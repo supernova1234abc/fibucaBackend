@@ -1,0 +1,41 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+// ✅ Step 1: Prisma Schema (prisma/schema.prisma)
+// Run: npx prisma migrate dev --name init
+
+model User {
+  id             Int      @id @default(autoincrement())
+  name           String
+  username       String   @unique  // ✅ Add this line
+  email          String?           // optional now
+  password       String
+  employeeNumber String   @unique
+  role           Role     @default(CLIENT)
+  firstLogin     Boolean  @default(true)
+  createdAt      DateTime @default(now())
+}
+
+
+model Submission {
+  id             Int      @id @default(autoincrement())
+  employeeName   String
+  employeeNumber String
+  employerName   String
+  dues           String
+  witness        String
+  pdfPath        String
+  submittedAt    DateTime @default(now())
+}
+
+enum Role {
+  CLIENT
+  ADMIN
+  SUPERADMIN
+}
