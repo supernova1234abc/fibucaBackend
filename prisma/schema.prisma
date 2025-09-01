@@ -2,26 +2,34 @@
 generator client {
   provider = "prisma-client-js"
 }
-
+/*
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
+} 
+*/
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
+
+
 // ✅ Step 1: Prisma Schema (prisma/schema.prisma)
 // Run: npx prisma migrate dev --name init
 
 model User {
   id             Int      @id @default(autoincrement())
   name           String
-  username       String   @unique  // ✅ Add this line
-  email          String?           // optional now
+  username       String   @unique
+  email          String?
   password       String
   employeeNumber String   @unique
   role           Role     @default(CLIENT)
   firstLogin     Boolean  @default(true)
   createdAt      DateTime @default(now())
+  idCards        IdCard[] // <-- Add this line
 }
-
 
 model Submission {
   id             Int      @id @default(autoincrement())
@@ -38,4 +46,16 @@ enum Role {
   CLIENT
   ADMIN
   SUPERADMIN
+}
+
+model IdCard {
+  id         Int      @id @default(autoincrement())
+  user       User     @relation(fields: [userId], references: [id])
+  userId     Int
+  fullName   String
+  photoUrl   String? // URL or path to uploaded photo
+  company    String
+  role       String
+  issuedAt   DateTime @default(now())
+  cardNumber String   @unique
 }
