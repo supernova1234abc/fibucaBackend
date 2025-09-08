@@ -541,6 +541,169 @@ app.delete('/api/idcards/:id', async (req, res) => {
 });
 
 
+// GET   /api/admin/users
+// List all users (omit password)
+app.get('/api/admin/users', /* requireAuth, requireRole(['ADMIN','SUPERADMIN']), */ async (req, res) => {
+  try {
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        name: true,
+        username: true,
+        email: true,
+        employeeNumber: true,
+        role: true,
+        firstLogin: true,
+        createdAt: true
+      },
+      orderBy: { createdAt: 'desc' }
+    })
+    res.json(users)
+  } catch (err) {
+    console.error('❌ GET /api/admin/users error:', err)
+    res.status(500).json({ error: 'Failed to fetch users' })
+  }
+})
+
+// ——————————————————————————
+// POST  /api/admin/users
+// Create a new user
+app.post('/api/admin/users', /* requireAuth, requireRole(['ADMIN','SUPERADMIN']), */ async (req, res) => {
+  const { name, username, email, password, role, employeeNumber } = req.body
+
+  if (!name || !username || !password || !employeeNumber) {
+    return res.status(400).json({
+      error: 'name, username, password and employeeNumber are required'
+    })
+  }
+
+  try {
+    // ensure username & employeeNumber are unique
+    const conflict = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { username },
+          { employeeNumber }
+        ]
+      }
+    })
+    if (conflict) {
+      return res
+        .status(409)
+        .json({ error: 'username or employeeNumber already in use' })
+    }
+
+    // hash the password
+    const hash = await bcrypt.hash(password, 10)
+
+    const user = await prisma.user.create({
+      data: {
+        name,
+        username,
+        email,
+        password: hash,
+        role: role || 'CLIENT',
+        employeeNumber
+      },
+      select: {
+        id: true,
+        name: true,
+        username: true,
+        email: true,
+        employeeNumber: true,
+        role: true,
+        firstLogin: true,
+        createdAt: true
+      }
+    })
+
+    res.status(201).json(user)
+  } catch (err) {
+    console.error('❌ POST /api/admin/users error:', err)
+    res.status(500).json({ error: 'Failed to create user' })
+  }
+})
+
+// ——————————————————————————
+// PUT   /api/admin/users/:id
+// Update name, email, role or employeeNumber
+app.put('/api/admin/users/:id', /* requireAuth, requireRole(['ADMIN','SUPERADMIN']), */ async (req, res) => {
+  const { id } = req.params
+  const { name, email, role, employeeNumber } = req.body
+
+  try {
+    const existing = await prisma.user.findUnique({
+      where: { id: Number(id) }
+    })
+    if (!existing) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    // if employeeNumber changed, check uniqueness
+    if (employeeNumber && employeeNumber !== existing.employeeNumber) {
+      const dup = await prisma.user.findUnique({
+        where: { employeeNumber }
+      })
+      if (dup) {
+        return res
+          .status(409)
+          .json({ error: 'employeeNumber already in use' })
+      }
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: Number(id) },
+      data: {
+        name: name  ?? existing.name,
+        email: email ?? existing.email,
+        role: role  ?? existing.role,
+        employeeNumber: employeeNumber ?? existing.employeeNumber
+      },
+      select: {
+        id: true,
+        name: true,
+        username: true,
+        email: true,
+        employeeNumber: true,
+        role: true,
+        firstLogin: true,
+        createdAt: true
+      }
+    })
+
+    res.json(updated)
+  } catch (err) {
+    console.error(`❌ PUT /api/admin/users/${id} error:`, err)
+    res.status(500).json({ error: 'Failed to update user' })
+  }
+})
+
+// ——————————————————————————
+// DELETE /api/admin/users/:id
+// Delete a user by ID
+app.delete('/api/admin/users/:id', /* requireAuth, requireRole(['ADMIN','SUPERADMIN']), */ async (req, res) => {
+  const { id } = req.params
+
+  try {
+    const existing = await prisma.user.findUnique({
+      where: { id: Number(id) }
+    })
+    if (!existing) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    await prisma.user.delete({
+      where: { id: Number(id) }
+    })
+
+    res.json({ message: 'User deleted successfully', id: Number(id) })
+  } catch (err) {
+    console.error(`❌ DELETE /api/admin/users/${id} error:`, err)
+    res.status(500).json({ error: 'Failed to delete user' })
+  }
+})
+
+
 
 // Start the server
 app.listen(PORT, () => {
