@@ -1,103 +1,289 @@
-// ✅ backend/index.js (FIBUCA backend using Prisma + Express)
-const express = require('express');
-const multer = require('multer');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const { PrismaClient } = require('@prisma/client');
-const bcrypt = require('bcrypt');
-require('dotenv').config();
+// ✅ backend/index.js (FIBUCA backend using Prisma + Express + JWT cookies)
+require('dotenv').config()
+const express = require('express')
+const cors = require('cors')
+const cookieParser = require('cookie-parser')
+const multer = require('multer')
+const fs = require('fs')
+const path = require('path')
+const jwt = require('jsonwebtoken')
+const bcrypt = require('bcrypt')
+const { PrismaClient } = require('@prisma/client')
 
-const app = express();
-/*
+const app = express()
+const prisma = new PrismaClient()
+const PORT = process.env.PORT || 4000
+const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
+
+// —–– CORS + JSON + Cookies
 app.use(cors({
- //frontend url  origin: 'https://8f9eda5f8bbd.ngrok-free.app', // 👈 Replace with actual URL
-  origin: 'http://localhost:5173', // 👈 Replace with actual URL
+  origin:'http://localhost:5173',
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
-}));
+}))
+app.use(express.json())
+app.use(express.urlencoded({ extended: true }))
+app.use(cookieParser())
 
-*/
-const prisma = new PrismaClient();
-const PORT = process.env.PORT || 4000;
+// —–– Serve static uploads
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
+app.use('/photos', express.static(path.join(__dirname, 'photos')))
 
-const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret';
+// —–– Multer setup for PDF & photo uploads
+const pdfStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = './uploads'
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir)
+    cb(null, dir)
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`)
+  }
+})
+const uploadPDF = multer({ storage: pdfStorage })
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+const photoStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = './photos'
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir)
+    cb(null, dir)
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname)
+    cb(null, `${Date.now()}${ext}`)
+  }
+})
+const uploadPhoto = multer({ storage: photoStorage })
 
-
-app.post('/api/login', async (req, res) => {
-  const { employeeNumber, password } = req.body;
+// —–– Auth middleware to protect routes
+function authenticate(req, res, next) {
+  const token = req.cookies.fibuca_token
+  if (!token) return res.status(401).json({ message: 'Not authenticated' })
 
   try {
-    const user = await prisma.user.findUnique({ where: { username: employeeNumber } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const payload = jwt.verify(token, JWT_SECRET)
+    req.user = payload   // { id, employeeNumber, role, firstLogin }
+    next()
+  } catch (err) {
+    console.error('❌ Invalid JWT:', err)
+    res.clearCookie('fibuca_token')
+    return res.status(401).json({ message: 'Invalid or expired token' })
+  }
+}
 
-    const valid = await bcrypt.compare(password, user.password);
-    if (!valid) return res.status(401).json({ error: 'Incorrect password' });
+// —–– PUBLIC: Register a new admin/client user
+app.post('/register', async (req, res) => {
+  const { name, email, password, employeeNumber, role } = req.body
+  if (!name || !email || !password || !employeeNumber) {
+    return res.status(400).json({ error: 'All fields required' })
+  }
 
-    // ✅ Fetch the latest submission with PDF
-    const submission = await prisma.submission.findFirst({
-      where: { employeeNumber: user.employeeNumber },
-      orderBy: { submittedAt: 'desc' } // just in case user submitted multiple times
-    });
+  try {
+    const exists = await prisma.user.findFirst({
+      where: { OR: [{ email }, { employeeNumber }] }
+    })
+    if (exists) {
+      return res.status(409).json({ error: 'User already exists' })
+    }
+
+    const hashed = await bcrypt.hash(password, 10)
+    const user = await prisma.user.create({
+      data: {
+        name,
+        email,
+        username: employeeNumber,
+        employeeNumber,
+        password: hashed,
+        role: role || 'CLIENT',
+        firstLogin: true
+      }
+    })
+
+    return res.status(201).json({
+      message: 'Registered successfully',
+      user: { id: user.id, name: user.name, email: user.email }
+    })
+  } catch (err) {
+    console.error('❌ Register error:', err)
+    return res.status(500).json({ error: 'Failed to register user' })
+  }
+})
+
+// —–– PUBLIC: Client “submit‐form” flow → create submission, user, placeholder IdCard
+app.post('/submit-form', uploadPDF.single('pdf'), async (req, res) => {
+  try {
+    // parse form data + save PDF
+    const form = JSON.parse(req.body.data)
+    const pdfPath = req.file.path
+
+    // 1) save submission
+    const submission = await prisma.submission.create({
+      data: {
+        employeeName: form.employeeName,
+        employeeNumber: form.employeeNumber,
+        employerName: form.employerName,
+        dues: form.dues,
+        witness: form.witness,
+        pdfPath,
+        submittedAt: new Date()
+      }
+    })
+
+    // 2) auto‐generate user with temp password
+    const suffix = Math.floor(1000 + Math.random() * 9000).toString()
+    const tempPassword = form.employeeNumber + suffix
+    const hashed = await bcrypt.hash(tempPassword, 10)
+
+    const user = await prisma.user.create({
+      data: {
+        name: form.employeeName,
+        username: form.employeeNumber,
+        email: `${form.employeeNumber}@fibuca.com`,
+        password: hashed,
+        employeeNumber: form.employeeNumber,
+        role: 'CLIENT',
+        firstLogin: true
+      }
+    })
+
+    // 3) generate placeholder ID card
+    function makeCardNumber() {
+      const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+      const part = Array.from({ length: 2 })
+        .map(() => letters[Math.floor(Math.random() * letters.length)])
+        .join('')
+      const digits = Math.floor(100000 + Math.random() * 900000)
+      return `FIBUCA${part}${digits}`
+    }
+
+    const placeholderCard = await prisma.idCard.create({
+      data: {
+        userId: user.id,
+        fullName: user.name,
+        photoUrl: '',
+        company: submission.employerName,
+        role: 'Member',
+        issuedAt: new Date(),
+        cardNumber: makeCardNumber()
+      }
+    })
+
+    // 4) respond with credentials & card
+    return res.json({
+      message: 'Form submitted & registered',
+      submission,
+      loginCredentials: {
+        username: user.username,
+        password: tempPassword
+      },
+      idCard: placeholderCard
+    })
+  } catch (err) {
+    console.error('❌ Submission error:', err)
+    return res.status(500).json({ error: 'Failed to submit form' })
+  }
+})
+
+// —–– PUBLIC: Login → sign JWT & set HTTP-only cookie
+app.post('/api/login', async (req, res) => {
+  const { employeeNumber, password } = req.body
+  try {
+    const user = await prisma.user.findUnique({
+      where: { employeeNumber }
+    })
+    if (!user) return res.status(404).json({ error: 'User not found' })
+
+    const valid = await bcrypt.compare(password, user.password)
+    if (!valid) return res.status(401).json({ error: 'Incorrect password' })
 
     const token = jwt.sign(
-      {
-        id: user.id,
-        employeeNumber: user.employeeNumber,
-        role: user.role,
-        firstLogin: user.firstLogin,
-      },
+      { id: user.id, employeeNumber: user.employeeNumber, role: user.role, firstLogin: user.firstLogin },
       JWT_SECRET,
       { expiresIn: '2h' }
-    );
+    )
 
-    res.json({
-      message: 'Login successful',
-      token,
+    // set cookie
+    res.cookie('fibuca_token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 1000 * 60 * 60 * 2
+    })
+
+    // include last PDF path
+    const last = await prisma.submission.findFirst({
+      where: { employeeNumber: user.employeeNumber },
+      orderBy: { submittedAt: 'desc' }
+    })
+
+    return res.json({
       user: {
         id: user.id,
         employeeNumber: user.employeeNumber,
         role: user.role,
-        firstLogin: user.firstLogin,
         name: user.name,
-        pdfPath: submission?.pdfPath || null // ✅ include it
+        firstLogin: user.firstLogin,
+        pdfPath: last?.pdfPath || null
       }
-    });
-
+    })
   } catch (err) {
-    console.error('❌ Login error:', err);
-    res.status(500).json({ error: 'Login failed' });
+    console.error('❌ Login error:', err)
+    return res.status(500).json({ error: 'Login failed' })
   }
+})
+
+// —–– PROTECTED: WhoAmI
+app.get('/api/me', authenticate, async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+  res.json({ user });
 });
 
 
+// —–– PROTECTED: Logout (clear cookie)
+app.post('/api/logout', authenticate, (req, res) => {
+  res.clearCookie('fibuca_token', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict'
+  })
+  return res.json({ message: 'Logged out' })
+})
 
-app.put('/api/change-password', async (req, res) => {
-  const { employeeNumber, newPassword } = req.body;
-
+// —–– PROTECTED: Change password
+app.put('/api/change-password', authenticate, async (req, res) => {
+  const { oldPassword, newPassword } = req.body
+  if (!oldPassword || !newPassword) {
+    return res.status(400).json({ error: 'Both fields required' })
+  }
   try {
-    const hashed = await bcrypt.hash(newPassword, 10);
-
+    const u = await prisma.user.findUnique({ where: { id: req.user.id } })
+    if (!await bcrypt.compare(oldPassword, u.password)) {
+      return res.status(401).json({ error: 'Current password incorrect' })
+    }
+    const hashed = await bcrypt.hash(newPassword, 10)
     await prisma.user.update({
-      where: { employeeNumber },
-      data: {
-        password: hashed,
-        firstLogin: false
-      }
-    });
-
-    res.json({ message: 'Password updated' });
+      where: { id: req.user.id },
+      data: { password: hashed, firstLogin: false }
+    })
+    return res.json({ message: 'Password changed' })
   } catch (err) {
-    console.error('❌ Password update error:', err);
-    res.status(500).json({ error: 'Failed to update password' });
+    console.error('❌ change-password error:', err)
+    return res.status(500).json({ error: 'Failed to change password' })
   }
-});
+})
+
+// —–– PROTECTED: Fetch ID cards
+app.get('/api/idcards/:userId', authenticate, async (req, res) => {
+  const uid = parseInt(req.params.userId)
+  if (req.user.id !== uid && req.user.role !== 'SUPERADMIN') {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+  const cards = await prisma.idCard.findMany({
+    where: { userId: uid },
+    orderBy: { issuedAt: 'desc' }
+  })
+  return res.json(cards)
+})
 
 
 
@@ -145,16 +331,16 @@ app.post('/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
- const newUser = await prisma.user.create({
-  data: {
-    name,
-    username: employeeNumber, // ✅ Added
-    email,
-    employeeNumber,
-    password: hashedPassword,
-    role: role || 'CLIENT'
-  }
-});
+    const newUser = await prisma.user.create({
+      data: {
+        name,
+        username: employeeNumber, // ✅ Added
+        email,
+        employeeNumber,
+        password: hashedPassword,
+        role: role || 'CLIENT'
+      }
+    });
 
 
     res.status(201).json({ message: 'Registered successfully', user: { id: newUser.id, name: newUser.name, email: newUser.email } });
@@ -182,29 +368,29 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
     // 2️⃣ Create the Submission record
     const submission = await prisma.submission.create({
       data: {
-        employeeName:  form.employeeName,
+        employeeName: form.employeeName,
         employeeNumber: form.employeeNumber,
-        employerName:  form.employerName,
-        dues:          form.dues,
-        witness:       form.witness,
+        employerName: form.employerName,
+        dues: form.dues,
+        witness: form.witness,
         pdfPath,
-        submittedAt:   new Date()
+        submittedAt: new Date()
       }
     });
 
     // 3️⃣ Auto-generate password and create the User
-    const suffix        = Math.floor(1000 + Math.random() * 9000).toString();
-    const tempPassword  = form.employeeNumber + suffix;
-    const hashedPassword= await bcrypt.hash(tempPassword, 10);
+    const suffix = Math.floor(1000 + Math.random() * 9000).toString();
+    const tempPassword = form.employeeNumber + suffix;
+    const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
     const user = await prisma.user.create({
       data: {
-        name:           form.employeeName,
-        username:       form.employeeNumber,
-        email:          `${form.employeeNumber}@fibuca.com`,
-        password:       hashedPassword,
+        name: form.employeeName,
+        username: form.employeeNumber,
+        email: `${form.employeeNumber}@fibuca.com`,
+        password: hashedPassword,
         employeeNumber: form.employeeNumber,
-        role:           'CLIENT'
+        role: 'CLIENT'
       }
     });
 
@@ -212,21 +398,21 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
     //    with no photoUrl yet and a FIBUCA + 2 letters + 6 digits number
     function makeCardNumber() {
       const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-      const prefix  = Array.from({ length: 2 })
-                          .map(() => letters[Math.floor(Math.random() * letters.length)])
-                          .join('');
-      const digits  = Math.floor(100000 + Math.random() * 900000);
+      const prefix = Array.from({ length: 2 })
+        .map(() => letters[Math.floor(Math.random() * letters.length)])
+        .join('');
+      const digits = Math.floor(100000 + Math.random() * 900000);
       return `FIBUCA${prefix}${digits}`;
     }
 
     const placeholderCard = await prisma.idCard.create({
       data: {
-        userId:     user.id,
-        fullName:   user.name,
-        photoUrl:   '',                // empty until they upload or capture later
-        company:    submission.employerName,
-        role:       'Member',          // default for CLIENT
-        issuedAt:   new Date(),
+        userId: user.id,
+        fullName: user.name,
+        photoUrl: '',                // empty until they upload or capture later
+        company: submission.employerName,
+        role: 'Member',          // default for CLIENT
+        issuedAt: new Date(),
         cardNumber: makeCardNumber()
       }
     });
@@ -236,11 +422,11 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
       message: 'Form submitted, user registered & placeholder ID card created',
       submission,
       user: {
-        id:             user.id,
-        name:           user.name,
+        id: user.id,
+        name: user.name,
         employeeNumber: user.employeeNumber,
-        role:           user.role,
-        firstLogin:     user.firstLogin,
+        role: user.role,
+        firstLogin: user.firstLogin,
         pdfPath
       },
       loginCredentials: { username: user.username, password: tempPassword },
@@ -369,17 +555,7 @@ app.post('/bulk-upload', async (req, res) => {
  * Create a new ID card
  */
 
-const photoStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = './photos';
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
-  }
-});
-const uploadPhoto = multer({ storage: photoStorage });
+
 
 const { removeBackground } = require('./py-tools/utils/runPython');
 
@@ -473,10 +649,11 @@ app.put(
     }
 
     try {
+      const filename    = req.file.filename;                        // e.g. '1623456789012.png'
+const relativeUrl = path.posix.join('photos', filename);
       const updated = await prisma.idCard.update({
         where: { id },
-        data: { photoUrl: req.file.path }
-      });
+  data: { photoUrl: relativeUrl }      });
       res.json({ message: 'Photo updated', card: updated });
     } catch (err) {
       console.error('❌ Update ID card photo failed:', err);
@@ -505,8 +682,7 @@ app.put('/api/idcards/:id/clean-photo', async (req, res) => {
 
     // Prepare cleaned image path
     const cleanedFilename = `${Date.now()}-cleaned.png`;
-    const cleanedPath = path.join('photos', cleanedFilename);
-
+const cleanedPath = path.posix.join('photos', cleanedFilename); // ✅ always uses "/"
     // Run background removal
     await removeBackground(originalPath, cleanedPath);
 
@@ -654,9 +830,9 @@ app.put('/api/admin/users/:id', /* requireAuth, requireRole(['ADMIN','SUPERADMIN
     const updated = await prisma.user.update({
       where: { id: Number(id) },
       data: {
-        name: name  ?? existing.name,
+        name: name ?? existing.name,
         email: email ?? existing.email,
-        role: role  ?? existing.role,
+        role: role ?? existing.role,
         employeeNumber: employeeNumber ?? existing.employeeNumber
       },
       select: {
