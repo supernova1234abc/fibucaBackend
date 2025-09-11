@@ -1,4 +1,4 @@
-// ✅ backend/index.js (FIBUCA backend using Prisma + Express + JWT cookies)
+// backend/index.js
 const express = require('express')
 const cors = require('cors')
 const cookieParser = require('cookie-parser')
@@ -9,41 +9,35 @@ const jwt = require('jsonwebtoken')
 const bcrypt = require('bcrypt')
 const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
+
 const app = express()
 const prisma = new PrismaClient()
 const PORT = process.env.PORT || 4000
 const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 
-
-// —–– CORS + JSON + Cookies
-// ✅ Make sure FRONTEND_URL is set correctly in your Render dashboard
-const allowedOrigin = process.env.FRONTEND_URL || "http://localhost:5173";
+// --------------------
+// CORS + JSON + Cookies
+// --------------------
+const allowedOrigin = process.env.FRONTEND_URL || 'http://localhost:5173'
 
 app.use(cors({
   origin: allowedOrigin,
-  credentials: true, // Required for cookies / sessions
-}));
+  credentials: true, // required for cookies
+}))
 
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 app.use(cookieParser())
 
-// —–– Serve static uploads
+// --------------------
+// Serve static files
+// --------------------
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
 app.use('/photos', express.static(path.join(__dirname, 'photos')))
 
-
-    // set cookie
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "none",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-    res.json({ user }); // no token returned
-
-
-// —–– Multer setup for PDF & photo uploads
+// --------------------
+// Multer setup
+// --------------------
 const pdfStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     const dir = './uploads'
@@ -69,14 +63,16 @@ const photoStorage = multer.diskStorage({
 })
 const uploadPhoto = multer({ storage: photoStorage })
 
-// —–– Auth middleware to protect routes
+// --------------------
+// Auth middleware
+// --------------------
 function authenticate(req, res, next) {
   const token = req.cookies.fibuca_token
   if (!token) return res.status(401).json({ message: 'Not authenticated' })
 
   try {
     const payload = jwt.verify(token, JWT_SECRET)
-    req.user = payload   // { id, employeeNumber, role, firstLogin }
+    req.user = payload
     next()
   } catch (err) {
     console.error('❌ Invalid JWT:', err)
@@ -85,7 +81,11 @@ function authenticate(req, res, next) {
   }
 }
 
-// —–– PUBLIC: Register a new admin/client user
+// --------------------
+// PUBLIC ROUTES
+// --------------------
+
+// Register new user
 app.post('/register', async (req, res) => {
   const { name, email, password, employeeNumber, role } = req.body
   if (!name || !email || !password || !employeeNumber) {
@@ -96,9 +96,7 @@ app.post('/register', async (req, res) => {
     const exists = await prisma.user.findFirst({
       where: { OR: [{ email }, { employeeNumber }] }
     })
-    if (exists) {
-      return res.status(409).json({ error: 'User already exists' })
-    }
+    if (exists) return res.status(409).json({ error: 'User already exists' })
 
     const hashed = await bcrypt.hash(password, 10)
     const user = await prisma.user.create({
@@ -123,84 +121,7 @@ app.post('/register', async (req, res) => {
   }
 })
 
-// —–– PUBLIC: Client “submit‐form” flow → create submission, user, placeholder IdCard
-app.post('/submit-form', uploadPDF.single('pdf'), async (req, res) => {
-  try {
-    // parse form data + save PDF
-    const form = JSON.parse(req.body.data)
-    const pdfPath = req.file.path
-
-    // 1) save submission
-    const submission = await prisma.submission.create({
-      data: {
-        employeeName: form.employeeName,
-        employeeNumber: form.employeeNumber,
-        employerName: form.employerName,
-        dues: form.dues,
-        witness: form.witness,
-        pdfPath,
-        submittedAt: new Date()
-      }
-    })
-
-    // 2) auto‐generate user with temp password
-    const suffix = Math.floor(1000 + Math.random() * 9000).toString()
-    const tempPassword = form.employeeNumber + suffix
-    const hashed = await bcrypt.hash(tempPassword, 10)
-
-    const user = await prisma.user.create({
-      data: {
-        name: form.employeeName,
-        username: form.employeeNumber,
-        email: `${form.employeeNumber}@fibuca.com`,
-        password: hashed,
-        employeeNumber: form.employeeNumber,
-        role: 'CLIENT',
-        firstLogin: true
-      }
-    })
-
-    // 3) generate placeholder ID card
-    function makeCardNumber() {
-      const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-      const part = Array.from({ length: 2 })
-        .map(() => letters[Math.floor(Math.random() * letters.length)])
-        .join('')
-      const digits = Math.floor(100000 + Math.random() * 900000)
-      return `FIBUCA${part}${digits}`
-    }
-
-    const placeholderCard = await prisma.idCard.create({
-      data: {
-        userId: user.id,
-        fullName: user.name,
-        photoUrl: '',
-        company: submission.employerName,
-        role: 'Member',
-        issuedAt: new Date(),
-        cardNumber: makeCardNumber()
-      }
-    })
-
-    // 4) respond with credentials & card
-    return res.json({
-      message: 'Form submitted & registered',
-      submission,
-      loginCredentials: {
-        username: user.username,
-        password: tempPassword
-      },
-      idCard: placeholderCard
-    })
-  } catch (err) {
-    console.error('❌ Submission error:', err)
-    return res.status(500).json({ error: 'Failed to submit form' })
-  }
-})
-
-// —–– PUBLIC: Login → sign JWT & set HTTP-only cookie
-
-// —–– LOGIN route
+// Login → set cookie
 app.post('/api/login', async (req, res) => {
   const { employeeNumber, password } = req.body
   try {
@@ -210,29 +131,26 @@ app.post('/api/login', async (req, res) => {
     const valid = await bcrypt.compare(password, user.password)
     if (!valid) return res.status(401).json({ error: 'Incorrect password' })
 
-    // Generate JWT
     const token = jwt.sign(
       { id: user.id, employeeNumber: user.employeeNumber, role: user.role, firstLogin: user.firstLogin },
       JWT_SECRET,
       { expiresIn: '2h' }
     )
 
-    // Set HTTP-only cookie
     res.cookie('fibuca_token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'none',  // cross-origin
+      sameSite: 'none', // cross-origin
       maxAge: 7 * 24 * 60 * 60 * 1000
     })
 
-    // Optional: include last PDF path
+    // last PDF path
     const last = await prisma.submission.findFirst({
       where: { employeeNumber: user.employeeNumber },
       orderBy: { submittedAt: 'desc' }
     })
 
-    // Respond with user (token is in cookie)
-    return res.json({
+    res.json({
       user: {
         id: user.id,
         employeeNumber: user.employeeNumber,
@@ -240,8 +158,7 @@ app.post('/api/login', async (req, res) => {
         name: user.name,
         firstLogin: user.firstLogin,
         pdfPath: last?.pdfPath || null
-      },
-      token // optional, can ignore on frontend if using cookie
+      }
     })
 
   } catch (err) {
@@ -250,32 +167,24 @@ app.post('/api/login', async (req, res) => {
   }
 })
 
+// --------------------
+// PROTECTED ROUTES
+// --------------------
 
-// —–– PROTECTED: WhoAmI
-// —–– Auth middleware
-function authenticate(req, res, next) {
-  const token = req.cookies.fibuca_token
-  if (!token) return res.status(401).json({ message: 'Not authenticated' })
+// WhoAmI
+app.get('/api/me', authenticate, async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.user.id } })
+  res.json({ user })
+})
 
-  try {
-    const payload = jwt.verify(token, JWT_SECRET)
-    req.user = payload
-    next()
-  } catch (err) {
-    console.error('❌ Invalid JWT:', err)
-    res.clearCookie('fibuca_token')
-    return res.status(401).json({ message: 'Invalid or expired token' })
-  }
-}
-
-// —–– PROTECTED: Logout (clear cookie)
+// Logout
 app.post('/api/logout', authenticate, (req, res) => {
   res.clearCookie('fibuca_token', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict'
+    sameSite: 'none'
   })
-  return res.json({ message: 'Logged out' })
+  res.json({ message: 'Logged out' })
 })
 
 // —–– PROTECTED: Change password
@@ -307,13 +216,14 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
   if (req.user.id !== uid && req.user.role !== 'SUPERADMIN') {
     return res.status(403).json({ error: 'Forbidden' })
   }
+
   const cards = await prisma.idCard.findMany({
     where: { userId: uid },
     orderBy: { issuedAt: 'desc' }
   })
-  return res.json(cards)
-})
 
+  res.json(cards)
+})
 
 
 // Serve uploaded PDFs
