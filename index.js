@@ -16,12 +16,14 @@ const PORT = process.env.PORT || 4000
 const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 
 // —–– CORS + JSON + Cookies
-const allowedOrigin = process.env.VITE_FRONTEND_URL || "http://localhost:3000";
+// ✅ Make sure FRONTEND_URL is set correctly in your Render dashboard
+const allowedOrigin = process.env.VITE_FRONTEND_URL || "http://localhost:5173";
 
 app.use(cors({
   origin: allowedOrigin,
-  credentials: true
+  credentials: true, // Required for cookies / sessions
 }));
+
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 app.use(cookieParser())
