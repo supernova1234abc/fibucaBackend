@@ -200,29 +200,32 @@ app.post('/submit-form', uploadPDF.single('pdf'), async (req, res) => {
 
 // —–– PUBLIC: Login → sign JWT & set HTTP-only cookie
 app.post('/api/login', async (req, res) => {
-  const { employeeNumber, password } = req.body
+  const { employeeNumber, password } = req.body;
   try {
-    const user = await prisma.user.findUnique({
-      where: { employeeNumber }
-    })
-    if (!user) return res.status(404).json({ error: 'User not found' })
+    const user = await prisma.user.findUnique({ where: { employeeNumber } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const valid = await bcrypt.compare(password, user.password)
-    if (!valid) return res.status(401).json({ error: 'Incorrect password' })
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) return res.status(401).json({ error: 'Incorrect password' });
 
     const token = jwt.sign(
       { id: user.id, employeeNumber: user.employeeNumber, role: user.role, firstLogin: user.firstLogin },
       JWT_SECRET,
       { expiresIn: '2h' }
-    )
+    );
 
+    // Set HTTP-only cookie
+    res.cookie('fibuca_token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'none',
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    });
 
-
-    // include last PDF path
     const last = await prisma.submission.findFirst({
       where: { employeeNumber: user.employeeNumber },
       orderBy: { submittedAt: 'desc' }
-    })
+    });
 
     return res.json({
       user: {
@@ -232,13 +235,16 @@ app.post('/api/login', async (req, res) => {
         name: user.name,
         firstLogin: user.firstLogin,
         pdfPath: last?.pdfPath || null
-      }
-    })
+      },
+      token // optional, frontend can ignore if using cookies
+    });
+
   } catch (err) {
-    console.error('❌ Login error:', err)
-    return res.status(500).json({ error: 'Login failed' })
+    console.error('❌ Login error:', err);
+    return res.status(500).json({ error: 'Login failed' });
   }
-})
+});
+
 
 // —–– PROTECTED: WhoAmI
 app.get('/api/me', authenticate, async (req, res) => {
