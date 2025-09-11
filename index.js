@@ -1,5 +1,4 @@
 // ✅ backend/index.js (FIBUCA backend using Prisma + Express + JWT cookies)
-require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
 const cookieParser = require('cookie-parser')
@@ -9,11 +8,12 @@ const path = require('path')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcrypt')
 const { PrismaClient } = require('@prisma/client')
-
+require('dotenv').config()
 const app = express()
 const prisma = new PrismaClient()
 const PORT = process.env.PORT || 4000
 const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
+
 
 // —–– CORS + JSON + Cookies
 // ✅ Make sure FRONTEND_URL is set correctly in your Render dashboard
