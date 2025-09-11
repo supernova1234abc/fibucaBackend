@@ -6,7 +6,7 @@ function removeBackground(inputPath, outputPath) {
   const scriptPath = path.join(__dirname, '../remove_bg.py');
 
   return new Promise((resolve, reject) => {
-    execFile('python', [scriptPath, inputPath, outputPath], (error, stdout, stderr) => {
+execFile('python3', [scriptPath, inputPath, outputPath], (error, stdout, stderr) => {
       if (error) {
         console.error('❌ Python error:', error);
         console.error('📄 stderr:', stderr);
