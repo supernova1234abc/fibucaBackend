@@ -16,11 +16,12 @@ const PORT = process.env.PORT || 4000
 const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 
 // —–– CORS + JSON + Cookies
+const allowedOrigin = process.env.VITE_FRONTEND_URL || "http://localhost:3000";
+
 app.use(cors({
-  origin: 'process.env.VITE_FRONTEND_URL' || 'http://localhost:5173',
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  origin: allowedOrigin,
   credentials: true
-}))
+}));
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 app.use(cookieParser())
