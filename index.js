@@ -32,6 +32,17 @@ app.use(cookieParser())
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
 app.use('/photos', express.static(path.join(__dirname, 'photos')))
 
+
+    // set cookie
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "none",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+    res.json({ user }); // no token returned
+
+
 // —–– Multer setup for PDF & photo uploads
 const pdfStorage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -205,13 +216,7 @@ app.post('/api/login', async (req, res) => {
       { expiresIn: '2h' }
     )
 
-    // set cookie
-    res.cookie('fibuca_token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 1000 * 60 * 60 * 2
-    })
+
 
     // include last PDF path
     const last = await prisma.submission.findFirst({
