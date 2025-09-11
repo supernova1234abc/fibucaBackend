@@ -199,34 +199,39 @@ app.post('/submit-form', uploadPDF.single('pdf'), async (req, res) => {
 })
 
 // —–– PUBLIC: Login → sign JWT & set HTTP-only cookie
+
+// —–– LOGIN route
 app.post('/api/login', async (req, res) => {
-  const { employeeNumber, password } = req.body;
+  const { employeeNumber, password } = req.body
   try {
-    const user = await prisma.user.findUnique({ where: { employeeNumber } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const user = await prisma.user.findUnique({ where: { employeeNumber } })
+    if (!user) return res.status(404).json({ error: 'User not found' })
 
-    const valid = await bcrypt.compare(password, user.password);
-    if (!valid) return res.status(401).json({ error: 'Incorrect password' });
+    const valid = await bcrypt.compare(password, user.password)
+    if (!valid) return res.status(401).json({ error: 'Incorrect password' })
 
+    // Generate JWT
     const token = jwt.sign(
       { id: user.id, employeeNumber: user.employeeNumber, role: user.role, firstLogin: user.firstLogin },
       JWT_SECRET,
       { expiresIn: '2h' }
-    );
+    )
 
     // Set HTTP-only cookie
     res.cookie('fibuca_token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'none',
+      sameSite: 'none',  // cross-origin
       maxAge: 7 * 24 * 60 * 60 * 1000
-    });
+    })
 
+    // Optional: include last PDF path
     const last = await prisma.submission.findFirst({
       where: { employeeNumber: user.employeeNumber },
       orderBy: { submittedAt: 'desc' }
-    });
+    })
 
+    // Respond with user (token is in cookie)
     return res.json({
       user: {
         id: user.id,
@@ -236,22 +241,32 @@ app.post('/api/login', async (req, res) => {
         firstLogin: user.firstLogin,
         pdfPath: last?.pdfPath || null
       },
-      token // optional, frontend can ignore if using cookies
-    });
+      token // optional, can ignore on frontend if using cookie
+    })
 
   } catch (err) {
-    console.error('❌ Login error:', err);
-    return res.status(500).json({ error: 'Login failed' });
+    console.error('❌ Login error:', err)
+    return res.status(500).json({ error: 'Login failed' })
   }
-});
+})
 
 
 // —–– PROTECTED: WhoAmI
-app.get('/api/me', authenticate, async (req, res) => {
-  const user = await prisma.user.findUnique({ where: { id: req.user.id } });
-  res.json({ user });
-});
+// —–– Auth middleware
+function authenticate(req, res, next) {
+  const token = req.cookies.fibuca_token
+  if (!token) return res.status(401).json({ message: 'Not authenticated' })
 
+  try {
+    const payload = jwt.verify(token, JWT_SECRET)
+    req.user = payload
+    next()
+  } catch (err) {
+    console.error('❌ Invalid JWT:', err)
+    res.clearCookie('fibuca_token')
+    return res.status(401).json({ message: 'Invalid or expired token' })
+  }
+}
 
 // —–– PROTECTED: Logout (clear cookie)
 app.post('/api/logout', authenticate, (req, res) => {
