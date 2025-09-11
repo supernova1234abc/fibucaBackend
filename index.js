@@ -590,7 +590,8 @@ app.put(
 const relativeUrl = path.posix.join('photos', filename);
       const updated = await prisma.idCard.update({
         where: { id },
-  data: { photoUrl: relativeUrl }      });
+        data: { photoUrl: path.posix.join('photos', cleanedFilename) }
+  });
       res.json({ message: 'Photo updated', card: updated });
     } catch (err) {
       console.error('❌ Update ID card photo failed:', err);
