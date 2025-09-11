@@ -17,7 +17,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 
 // —–– CORS + JSON + Cookies
 // ✅ Make sure FRONTEND_URL is set correctly in your Render dashboard
-const allowedOrigin = process.env.VITE_FRONTEND_URL || "http://localhost:5173";
+const allowedOrigin = process.env.FRONTEND_URL || "http://localhost:5173";
 
 app.use(cors({
   origin: allowedOrigin,
