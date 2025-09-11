@@ -187,65 +187,6 @@ app.post('/api/logout', authenticate, (req, res) => {
   res.json({ message: 'Logged out' })
 })
 
-// —–– PROTECTED: Change password
-app.put('/api/change-password', authenticate, async (req, res) => {
-  const { oldPassword, newPassword } = req.body
-  if (!oldPassword || !newPassword) {
-    return res.status(400).json({ error: 'Both fields required' })
-  }
-  try {
-    const u = await prisma.user.findUnique({ where: { id: req.user.id } })
-    if (!await bcrypt.compare(oldPassword, u.password)) {
-      return res.status(401).json({ error: 'Current password incorrect' })
-    }
-    const hashed = await bcrypt.hash(newPassword, 10)
-    await prisma.user.update({
-      where: { id: req.user.id },
-      data: { password: hashed, firstLogin: false }
-    })
-    return res.json({ message: 'Password changed' })
-  } catch (err) {
-    console.error('❌ change-password error:', err)
-    return res.status(500).json({ error: 'Failed to change password' })
-  }
-})
-
-// —–– PROTECTED: Fetch ID cards
-app.get('/api/idcards/:userId', authenticate, async (req, res) => {
-  const uid = parseInt(req.params.userId)
-  if (req.user.id !== uid && req.user.role !== 'SUPERADMIN') {
-    return res.status(403).json({ error: 'Forbidden' })
-  }
-
-  const cards = await prisma.idCard.findMany({
-    where: { userId: uid },
-    orderBy: { issuedAt: 'desc' }
-  })
-
-  res.json(cards)
-})
-
-
-// Serve uploaded PDFs
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// Serve uploaded ID‐card photos
-app.use('/photos', express.static(path.join(__dirname, 'photos')));
-
-
-// Configure PDF upload
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = './uploads';
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
-  }
-});
-const upload = multer({ storage });
-
 // ✅ REGISTER NEW USER after form submission
 app.post('/register', async (req, res) => {
   const { name, email, password, employeeNumber, role } = req.body;
@@ -288,6 +229,62 @@ app.post('/register', async (req, res) => {
     res.status(500).json({ error: 'Failed to register user' });
   }
 });
+
+// —–– PROTECTED: Change password
+app.put('/api/change-password', authenticate, async (req, res) => {
+  const { oldPassword, newPassword } = req.body
+  if (!oldPassword || !newPassword) {
+    return res.status(400).json({ error: 'Both fields required' })
+  }
+  try {
+    const u = await prisma.user.findUnique({ where: { id: req.user.id } })
+    if (!await bcrypt.compare(oldPassword, u.password)) {
+      return res.status(401).json({ error: 'Current password incorrect' })
+    }
+    const hashed = await bcrypt.hash(newPassword, 10)
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: { password: hashed, firstLogin: false }
+    })
+    return res.json({ message: 'Password changed' })
+  } catch (err) {
+    console.error('❌ change-password error:', err)
+    return res.status(500).json({ error: 'Failed to change password' })
+  }
+})
+
+
+// —–– PROTECTED: Fetch ID cards
+app.get('/api/idcards/:userId', authenticate, async (req, res) => {
+  const uid = parseInt(req.params.userId)
+  if (req.user.id !== uid && req.user.role !== 'SUPERADMIN') {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+
+  const cards = await prisma.idCard.findMany({
+    where: { userId: uid },
+    orderBy: { issuedAt: 'desc' }
+  })
+
+  res.json(cards)
+})
+
+
+
+// Configure PDF upload
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = './uploads';
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  }
+});
+const upload = multer({ storage });
+
+
 
 /**
  * ✅ POST /submit-form
@@ -501,6 +498,7 @@ const { removeBackground } = require('./py-tools/utils/runPython');
 
 app.post('/api/idcards/photo', uploadPhoto.single('photo'), async (req, res) => {
   const { userId, fullName, company, role, cardNumber } = req.body;
+
   const originalPath = req.file.path;
   const cleanedPath = path.join('photos', `${Date.now()}-cleaned.png`);
 
@@ -612,24 +610,18 @@ app.put('/api/idcards/:id/clean-photo', async (req, res) => {
       return res.status(404).json({ error: 'ID card or photo not found' });
     }
 
-    // Resolve absolute path to original photo
-    const originalPath = path.resolve(card.photoUrl);
-    if (!fs.existsSync(originalPath)) {
-      console.error('❌ Original photo file not found:', originalPath);
-      return res.status(404).json({ error: 'Original photo file missing' });
-    }
+const originalPath = path.join(__dirname, 'photos', card.photoUrl);
 
-    // Prepare cleaned image path
-    const cleanedFilename = `${Date.now()}-cleaned.png`;
-const cleanedPath = path.posix.join('photos', cleanedFilename); // ✅ always uses "/"
-    // Run background removal
-    await removeBackground(originalPath, cleanedPath);
+const cleanedFilename = `${Date.now()}-cleaned.png`;
+const cleanedPath = path.join(__dirname, 'photos', cleanedFilename);
 
-    // Update DB with cleaned photo path
-    const updated = await prisma.idCard.update({
-      where: { id },
-      data: { photoUrl: cleanedPath }
-    });
+await removeBackground(originalPath, cleanedPath);
+
+const updated = await prisma.idCard.update({
+  where: { id },
+  data: { photoUrl: cleanedFilename }  // store only filename
+});
+
 
     res.json({ message: 'Photo cleaned and updated', card: updated });
   } catch (err) {
