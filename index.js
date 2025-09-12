@@ -256,19 +256,20 @@ app.put('/api/change-password', authenticate, async (req, res) => {
 
 // —–– PROTECTED: Fetch ID cards
 app.get('/api/idcards/:userId', authenticate, async (req, res) => {
-  const uid = parseInt(req.params.userId)
-  if (req.user.id !== uid && req.user.role !== 'SUPERADMIN') {
-    return res.status(403).json({ error: 'Forbidden' })
+  const uid = parseInt(req.params.userId);
+
+  // Allow CLIENT to fetch their own cards, SUPERADMIN can fetch any
+  if (req.user.role === 'CLIENT' && req.user.id !== uid) {
+    return res.status(403).json({ error: 'Forbidden' });
   }
 
   const cards = await prisma.idCard.findMany({
     where: { userId: uid },
     orderBy: { issuedAt: 'desc' }
-  })
+  });
 
-  res.json(cards)
-})
-
+  res.json(cards);
+});
 
 
 // Configure PDF upload
@@ -495,9 +496,13 @@ app.post('/bulk-upload', async (req, res) => {
 
 const { removeBackground } = require('./py-tools/utils/runPython');
 
-// ...existing code...
-app.post('/api/idcards/photo', uploadPhoto.single('photo'), async (req, res) => {
+app.post('/api/idcards/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   const { userId, fullName, company, role, cardNumber } = req.body;
+
+  // Only allow user to upload their own photo unless SUPERADMIN
+  if (req.user.role === 'CLIENT' && req.user.id !== parseInt(userId)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
 
   const originalPath = req.file.path;
   const cleanedFilename = `${Date.now()}-cleaned.png`;
@@ -524,7 +529,6 @@ app.post('/api/idcards/photo', uploadPhoto.single('photo'), async (req, res) => 
     res.status(500).json({ error: 'Failed to process photo or create ID card' });
   }
 });
-// ...existing code...
 
 app.post('/api/idcards', async (req, res) => {
   const { userId, fullName, photoUrl, company, role, cardNumber } = req.body;
