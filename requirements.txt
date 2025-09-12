@@ -1,2 +1,6 @@
 rembg
 Pillow
+onnxruntime
+numpy
+scipy
+opencv-python
