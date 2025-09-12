@@ -551,27 +551,6 @@ app.post('/api/idcards', async (req, res) => {
   }
 });
 
-/**
- * ✅ GET /api/idcards/:userId
- * Fetch all ID cards for a user
- */
-
-// GET /api/idcards/:userId
-app.get('/api/idcards/:userId', async (req, res) => {
-  console.log(`→ incoming GET /api/idcards/${req.params.userId}`);
-  const userId = parseInt(req.params.userId);
-  try {
-    const cards = await prisma.idCard.findMany({
-      where: { userId },
-      orderBy: { issuedAt: 'desc' }
-    });
-    // always return 200
-    return res.json(cards);
-  } catch (err) {
-    console.error('❌ Fetch ID cards error:', err);
-    return res.status(500).json({ error: 'Failed to fetch ID cards' });
-  }
-});
 
 // multer storage is already configured as `uploadPhoto`
 /**
