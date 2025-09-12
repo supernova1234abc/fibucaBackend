@@ -1,7 +1,7 @@
 FROM node:20
 
-# Install Python 3 and venv
-RUN apt-get update && apt-get install -y python3 python3-venv
+# Install Python 3, venv, and libGL for OpenCV
+RUN apt-get update && apt-get install -y python3 python3-venv libgl1-mesa-glx
 
 WORKDIR /app
 COPY . .
