@@ -495,16 +495,18 @@ app.post('/bulk-upload', async (req, res) => {
 
 const { removeBackground } = require('./py-tools/utils/runPython');
 
-
+// ...existing code...
 app.post('/api/idcards/photo', uploadPhoto.single('photo'), async (req, res) => {
   const { userId, fullName, company, role, cardNumber } = req.body;
 
   const originalPath = req.file.path;
-  const cleanedPath = path.join('photos', `${Date.now()}-cleaned.png`);
+  const cleanedFilename = `${Date.now()}-cleaned.png`;
+  const cleanedPath = path.join(__dirname, 'photos', cleanedFilename);
 
   try {
     await removeBackground(originalPath, cleanedPath);
 
+    const relativeUrl = path.posix.join('photos', cleanedFilename);
     const card = await prisma.idCard.create({
       data: {
         userId: parseInt(userId),
@@ -512,7 +514,7 @@ app.post('/api/idcards/photo', uploadPhoto.single('photo'), async (req, res) => 
         company,
         role,
         cardNumber,
-        photoUrl: cleanedPath
+        photoUrl: relativeUrl
       }
     });
 
@@ -522,7 +524,7 @@ app.post('/api/idcards/photo', uploadPhoto.single('photo'), async (req, res) => 
     res.status(500).json({ error: 'Failed to process photo or create ID card' });
   }
 });
-
+// ...existing code...
 
 app.post('/api/idcards', async (req, res) => {
   const { userId, fullName, photoUrl, company, role, cardNumber } = req.body;
@@ -600,7 +602,6 @@ app.put(
   }
 );
 
-
 app.put('/api/idcards/:id/clean-photo', async (req, res) => {
   const id = parseInt(req.params.id);
 
@@ -611,18 +612,17 @@ app.put('/api/idcards/:id/clean-photo', async (req, res) => {
       return res.status(404).json({ error: 'ID card or photo not found' });
     }
 
-const originalPath = path.join(__dirname, 'photos', card.photoUrl);
+    const originalPath = path.join(__dirname, card.photoUrl); // photoUrl is already 'photos/filename'
+    const cleanedFilename = `${Date.now()}-cleaned.png`;
+    const cleanedPath = path.join(__dirname, 'photos', cleanedFilename);
 
-const cleanedFilename = `${Date.now()}-cleaned.png`;
-const cleanedPath = path.join(__dirname, 'photos', cleanedFilename);
+    await removeBackground(originalPath, cleanedPath);
 
-await removeBackground(originalPath, cleanedPath);
-
-const updated = await prisma.idCard.update({
-  where: { id },
-  data: { photoUrl: cleanedFilename }  // store only filename
-});
-
+    const relativeUrl = path.posix.join('photos', cleanedFilename);
+    const updated = await prisma.idCard.update({
+      where: { id },
+      data: { photoUrl: relativeUrl } // always store as 'photos/filename'
+    });
 
     res.json({ message: 'Photo cleaned and updated', card: updated });
   } catch (err) {
@@ -630,7 +630,6 @@ const updated = await prisma.idCard.update({
     res.status(500).json({ error: 'Failed to clean photo' });
   }
 });
-
 
 
 /**
