@@ -732,6 +732,72 @@ app.delete('/api/admin/users/:id', /* requireAuth, requireRole(['ADMIN','SUPERAD
   }
 })
 
+// ——————————————————————————
+// Submissions endpoints (used by frontend at '/submissions')
+// GET /submissions -> ADMIN: all submissions; CLIENT: their own submissions
+app.get('/submissions', authenticate, async (req, res) => {
+  try {
+    if (req.user.role === 'CLIENT') {
+      const subs = await prisma.submission.findMany({
+        where: { employeeNumber: req.user.employeeNumber },
+        orderBy: { submittedAt: 'desc' }
+      })
+      return res.json(subs)
+    }
+
+    // ADMIN / SUPERADMIN -> all
+    const subs = await prisma.submission.findMany({
+      orderBy: { submittedAt: 'desc' }
+    })
+    res.json(subs)
+  } catch (err) {
+    console.error('❌ GET /submissions error:', err)
+    res.status(500).json({ error: 'Failed to fetch submissions' })
+  }
+})
+
+// PUT /submissions/:id -> update submission (admin only)
+app.put('/submissions/:id', authenticate, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!['ADMIN', 'SUPERADMIN'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+
+  const { employeeName, employeeNumber, employerName, dues, witness } = req.body
+  try {
+    const updated = await prisma.submission.update({
+      where: { id },
+      data: {
+        employeeName: employeeName ?? undefined,
+        employeeNumber: employeeNumber ?? undefined,
+        employerName: employerName ?? undefined,
+        dues: dues ?? undefined,
+        witness: witness ?? undefined
+      }
+    })
+    res.json(updated)
+  } catch (err) {
+    console.error(`❌ PUT /submissions/${id} error:`, err)
+    res.status(500).json({ error: 'Failed to update submission' })
+  }
+})
+
+// DELETE /submissions/:id -> delete submission (admin only)
+app.delete('/submissions/:id', authenticate, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!['ADMIN', 'SUPERADMIN'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+
+  try {
+    await prisma.submission.delete({ where: { id } })
+    res.json({ message: 'Submission deleted', id })
+  } catch (err) {
+    console.error(`❌ DELETE /submissions/${id} error:`, err)
+    res.status(500).json({ error: 'Failed to delete submission' })
+  }
+})
+
 
 
 // Start the server
