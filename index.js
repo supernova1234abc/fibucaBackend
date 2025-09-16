@@ -18,10 +18,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 // --------------------
 // CORS + JSON + Cookies
 // --------------------
-// Simple CORS: allow only one host (FRONTEND_URL or localhost:5173)
-const allowedOrigin = process.env.FRONTEND_URLS || 'http://localhost:5173'
+// Permissive CORS: allow all origins for testing (remove for production!)
 app.use(cors({
-  origin: allowedOrigin,
+  origin: true,
   credentials: true, // required for cookies
 }))
 
