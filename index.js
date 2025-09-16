@@ -143,14 +143,15 @@ app.post('/api/login', async (req, res) => {
       sameSite: 'none', // cross-origin
       maxAge: 7 * 24 * 60 * 60 * 1000
     })
-
     // last PDF path
     const last = await prisma.submission.findFirst({
       where: { employeeNumber: user.employeeNumber },
       orderBy: { submittedAt: 'desc' }
     })
 
+    // Also return token in JSON as a fallback for clients where cookies are blocked
     res.json({
+      token,
       user: {
         id: user.id,
         employeeNumber: user.employeeNumber,
