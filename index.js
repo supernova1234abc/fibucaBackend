@@ -391,17 +391,6 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
     console.error('❌ Submission error:', err);
     res.status(500).json({ error: 'Failed to submit form' });
   }
-
-  try {
-    const deleted = await prisma.submission.delete({ where: { id } });
-    if (deleted.pdfPath && fs.existsSync(deleted.pdfPath)) {
-      fs.unlinkSync(deleted.pdfPath);
-    }
-    res.json({ message: 'Deleted successfully' });
-  } catch (err) {
-    console.error('❌ Delete error:', err);
-    res.status(500).json({ error: 'Failed to delete submission' });
-  }
 });
 
 /**
