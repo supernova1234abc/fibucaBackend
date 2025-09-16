@@ -18,35 +18,12 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 // --------------------
 // CORS + JSON + Cookies
 // --------------------
-// Support multiple allowed origins via FRONTEND_URLS env var (comma-separated)
-// Example: https://fibuca-frontend.vercel.app,https://fibuca-frontend-abc.vercel.app,http://localhost:5173
-const allowedOriginsEnv = process.env.FRONTEND_URLS || process.env.FRONTEND_URL || 'http://localhost:5173'
-const allowedOrigins = allowedOriginsEnv.split(',').map(s => s.trim()).filter(Boolean)
-
-// DEBUG switch: when true, allow any origin (useful temporarily for quick testing)
-const debugAllowAll = process.env.DEBUG_ALLOW_ALL_ORIGINS === 'true'
-
-if (debugAllowAll) {
-  console.warn('⚠️ DEBUG_ALLOW_ALL_ORIGINS is enabled — CORS will allow any origin. Disable in production.')
-  app.use(cors({ origin: true, credentials: true }))
-} else {
-  app.use(cors({
-    origin: function(origin, callback) {
-      // allow non-browser requests like curl/postman (origin === undefined)
-      if (!origin) return callback(null, true)
-      if (allowedOrigins.indexOf(origin) !== -1) {
-        return callback(null, true)
-      }
-      const msg = `The CORS policy for this site does not allow access from the specified Origin: ${origin}`
-      return callback(new Error(msg), false)
-    },
-    credentials: true, // required for cookies
-  }))
-}
-
-// Log configured origins for easier debugging
-console.log('Configured allowedOrigins:', allowedOrigins)
-console.log('DEBUG_ALLOW_ALL_ORIGINS:', debugAllowAll)
+// Simple CORS: allow only one host (FRONTEND_URL or localhost:5173)
+const allowedOrigin = process.env.FRONTEND_URLS || 'http://localhost:5173'
+app.use(cors({
+  origin: allowedOrigin,
+  credentials: true, // required for cookies
+}))
 
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
