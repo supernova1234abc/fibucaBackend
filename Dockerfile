@@ -4,16 +4,19 @@ FROM node:20
 RUN apt-get update && apt-get install -y python3 python3-venv libgl1-mesa-glx
 
 WORKDIR /app
-COPY . .
 
+# Install Node.js dependencies first (cache busts only if package files change)
+COPY package*.json ./
 RUN npm install
 
-# Create Python virtual environment
+# Install Python dependencies first (cache busts only if requirements.txt changes)
+COPY requirements.txt ./
 RUN python3 -m venv venv
-
-# Install Python dependencies
 RUN venv/bin/pip install --upgrade pip
 RUN venv/bin/pip install -r requirements.txt
+
+# Copy the rest of the code
+COPY . .
 
 # Make sure your start.sh is executable
 RUN chmod +x start.sh
