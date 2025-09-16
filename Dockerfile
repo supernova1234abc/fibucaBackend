@@ -18,6 +18,9 @@ RUN venv/bin/pip install -r requirements.txt
 # Copy the rest of the code
 COPY . .
 
+# Generate Prisma client
+RUN npx prisma generate
+
 # Make sure your start.sh is executable
 RUN chmod +x start.sh
 
