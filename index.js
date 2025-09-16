@@ -18,10 +18,21 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 // --------------------
 // CORS + JSON + Cookies
 // --------------------
-const allowedOrigin = process.env.FRONTEND_URL || 'http://localhost:5173'
+// Support multiple allowed origins via FRONTEND_URLS env var (comma-separated)
+// Example: https://fibuca-frontend.vercel.app,https://fibuca-frontend-abc.vercel.app,http://localhost:5173
+const allowedOriginsEnv = process.env.FRONTEND_URLS || process.env.FRONTEND_URL || 'http://localhost:5173'
+const allowedOrigins = allowedOriginsEnv.split(',').map(s => s.trim()).filter(Boolean)
 
 app.use(cors({
-  origin: allowedOrigin,
+  origin: function(origin, callback) {
+    // allow non-browser requests like curl/postman (origin === undefined)
+    if (!origin) return callback(null, true)
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true)
+    }
+    const msg = `The CORS policy for this site does not allow access from the specified Origin: ${origin}`
+    return callback(new Error(msg), false)
+  },
   credentials: true, // required for cookies
 }))
 
@@ -67,7 +78,15 @@ const uploadPhoto = multer({ storage: photoStorage })
 // Auth middleware
 // --------------------
 function authenticate(req, res, next) {
-  const token = req.cookies.fibuca_token
+  // Accept token via Authorization header (Bearer ...) or cookie fibuca_token
+  const authHeader = req.headers.authorization || req.headers.Authorization
+  let token = null
+  if (authHeader && typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+    token = authHeader.slice(7)
+  } else if (req.cookies && req.cookies.fibuca_token) {
+    token = req.cookies.fibuca_token
+  }
+
   if (!token) return res.status(401).json({ message: 'Not authenticated' })
 
   try {
@@ -76,7 +95,8 @@ function authenticate(req, res, next) {
     next()
   } catch (err) {
     console.error('❌ Invalid JWT:', err)
-    res.clearCookie('fibuca_token')
+    // If the token came from cookie, clear it. If it was a header, nothing to clear.
+    if (req.cookies && req.cookies.fibuca_token) res.clearCookie('fibuca_token')
     return res.status(401).json({ message: 'Invalid or expired token' })
   }
 }
