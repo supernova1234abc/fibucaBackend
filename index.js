@@ -40,9 +40,9 @@ app.use('/photos', express.static(path.join(__dirname, 'photos')))
 // --------------------
 const pdfStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const dir = './uploads'
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir)
-    cb(null, dir)
+    const dir = './uploads';
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+    cb(null, dir);
   },
   filename: (req, file, cb) => {
     cb(null, `${Date.now()}-${file.originalname}`)
@@ -287,10 +287,7 @@ const upload = multer({ storage });
 
 
 
-/**
- * ✅ POST /submit-form
- * Receives form data + PDF and saves to database
- */
+
 /**
  * ✅ POST /submit-form
  * Receives form data + PDF and saves to database
@@ -315,24 +312,42 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
       }
     });
 
-    // 3️⃣ Auto-generate password and create the User
-    const suffix = Math.floor(1000 + Math.random() * 9000).toString();
-    const tempPassword = form.employeeNumber + suffix;
-    const hashedPassword = await bcrypt.hash(tempPassword, 10);
-
-    const user = await prisma.user.create({
-      data: {
-        name: form.employeeName,
-        username: form.employeeNumber,
-        email: `${form.employeeNumber}@fibuca.com`,
-        password: hashedPassword,
-        employeeNumber: form.employeeNumber,
-        role: 'CLIENT'
+    // 3️⃣ Check if user already exists
+    let user, tempPassword, hashedPassword;
+    try {
+      user = await prisma.user.findUnique({ where: { username: form.employeeNumber } });
+    } catch (err) {
+      user = null;
+    }
+    if (!user) {
+      // If not, create new user
+      const suffix = Math.floor(1000 + Math.random() * 9000).toString();
+      tempPassword = form.employeeNumber + suffix;
+      hashedPassword = await bcrypt.hash(tempPassword, 10);
+      try {
+        user = await prisma.user.create({
+          data: {
+            name: form.employeeName,
+            username: form.employeeNumber,
+            email: `${form.employeeNumber}@fibuca.com`,
+            password: hashedPassword,
+            employeeNumber: form.employeeNumber,
+            role: 'CLIENT'
+          }
+        });
+      } catch (err) {
+        if (err.code === 'P2002') {
+          // Unique constraint failed
+          return res.status(409).json({ error: 'A user with this employee number already exists.' });
+        }
+        throw err;
       }
-    });
+    } else {
+      // If user exists, set tempPassword to null so frontend knows not to auto-login
+      tempPassword = null;
+    }
 
-    // 4️⃣ Immediately generate a placeholder IdCard record
-    //    with no photoUrl yet and a FIBUCA + 2 letters + 6 digits number
+    // 4️⃣ Immediately generate a placeholder IdCard record if not exists
     function makeCardNumber() {
       const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
       const prefix = Array.from({ length: 2 })
@@ -342,17 +357,20 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
       return `FIBUCA${prefix}${digits}`;
     }
 
-    const placeholderCard = await prisma.idCard.create({
-      data: {
-        userId: user.id,
-        fullName: user.name,
-        photoUrl: '',                // empty until they upload or capture later
-        company: submission.employerName,
-        role: 'Member',          // default for CLIENT
-        issuedAt: new Date(),
-        cardNumber: makeCardNumber()
-      }
-    });
+    let placeholderCard = await prisma.idCard.findFirst({ where: { userId: user.id } });
+    if (!placeholderCard) {
+      placeholderCard = await prisma.idCard.create({
+        data: {
+          userId: user.id,
+          fullName: user.name,
+          photoUrl: '',                // empty until they upload or capture later
+          company: submission.employerName,
+          role: 'Member',          // default for CLIENT
+          issuedAt: new Date(),
+          cardNumber: makeCardNumber()
+        }
+      });
+    }
 
     // 5️⃣ Respond with everything the front-end needs
     res.status(200).json({
@@ -366,81 +384,13 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
         firstLogin: user.firstLogin,
         pdfPath
       },
-      loginCredentials: { username: user.username, password: tempPassword },
+      loginCredentials: tempPassword ? { username: user.username, password: tempPassword } : null,
       idCard: placeholderCard
     });
   } catch (err) {
     console.error('❌ Submission error:', err);
     res.status(500).json({ error: 'Failed to submit form' });
   }
-});
-
-/**
- * ✅ GET /submissions
- * Returns all submissions (for Manager/Admin dashboard)
- */
-app.get('/submissions', async (req, res) => {
-  try {
-    const records = await prisma.submission.findMany({ orderBy: { submittedAt: 'desc' } });
-    res.json(records);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch submissions' });
-  }
-});
-
-/**
- * ✅ GET /export/excel
- * Exports all submissions as downloadable Excel file
- */
-app.get('/export/excel', async (req, res) => {
-  const XLSX = require('xlsx');
-  try {
-    const records = await prisma.submission.findMany();
-    const cleaned = records.map(({ id, pdfPath, ...rest }) => ({ ...rest }));
-
-    const workbook = XLSX.utils.book_new();
-    const worksheet = XLSX.utils.json_to_sheet(cleaned);
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Submissions');
-
-    const tempPath = path.join(__dirname, 'fibuca_export.xlsx');
-    XLSX.writeFile(workbook, tempPath);
-
-    res.download(tempPath, 'fibuca_clients.xlsx', () => {
-      fs.unlinkSync(tempPath); // Clean after download
-    });
-  } catch (err) {
-    console.error('❌ Excel export error:', err);
-    res.status(500).json({ error: 'Failed to export Excel' });
-  }
-});
-
-/**
- * ✅ PUT /submissions/:id
- * Update a submission's info
- */
-app.put('/submissions/:id', async (req, res) => {
-  const id = parseInt(req.params.id);
-  const { employeeName, employeeNumber, employerName, dues, witness } = req.body;
-
-  try {
-    const updated = await prisma.submission.update({
-      where: { id },
-      data: { employeeName, employeeNumber, employerName, dues, witness }
-    });
-    res.json(updated);
-  } catch (err) {
-    console.error('❌ Update error:', err);
-    res.status(500).json({ error: 'Failed to update submission' });
-  }
-});
-
-/**
- * ✅ DELETE /submissions/:id
- * Delete a submission by ID
- */
-app.delete('/submissions/:id', async (req, res) => {
-  const id = parseInt(req.params.id);
 
   try {
     const deleted = await prisma.submission.delete({ where: { id } });
