@@ -19,10 +19,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 // CORS + JSON + Cookies
 // --------------------
 app.use(cors({
-  origin: "https://fibuca-frontend.vercel.app/", 
-  credentials: true,
+  origin: process.env.VITE_FRONTEND_URL,  // e.g. http://localhost:5173 or prod domain
+  credentials: true,                      // required for cookies/auth headers
 }));
-
 
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
