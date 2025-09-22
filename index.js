@@ -15,29 +15,21 @@ const app = express()
 const prisma = new PrismaClient()
 const PORT = process.env.PORT
 const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
-
-// --------------------
-// CORS
-// --------------------
+//cors
 const allowedOrigins = [
   process.env.FRONTEND_URL || "http://localhost:5173",
   "https://fibuca-frontend.vercel.app"
 ];
 
 app.use(cors({
-  origin: function(origin, callback){
-    // allow requests with no origin (like Postman)
-    if(!origin) return callback(null, true);
-    if(allowedOrigins.indexOf(origin) === -1){
-      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-      return callback(new Error(msg), false);
-    }
-    return callback(null, true);
+  origin: (origin, callback) => {
+    // allow requests with no origin (Postman, curl, etc.)
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error('CORS: Origin not allowed'));
   },
-  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  credentials: true
 }));
-app.options('*', cors({ origin: allowedOrigins, credentials: true }));
-
 
 // Parse JSON / URL-encoded requests
 app.use(express.json())
@@ -50,14 +42,7 @@ app.use(cookieParser())
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
 app.use('/photos', express.static(path.join(__dirname, 'photos')))
 
-// --------------------
-// Optional: preflight for all routes
-// --------------------
-app.options('*', cors({
-  origin: allowedOrigins,
-  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-  credentials: true,
-}))
+
 
 // --------------------
 // Multer setup
@@ -222,48 +207,6 @@ app.post('/api/logout', (req, res) => {
 });
 
 
-// ✅ REGISTER NEW USER after form submission
-app.post('/register', async (req, res) => {
-  const { name, email, password, employeeNumber, role } = req.body;
-
-  if (!name || !email || !password || !employeeNumber) {
-    return res.status(400).json({ error: 'All fields required' });
-  }
-
-  try {
-    const existing = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { email },
-          { employeeNumber }
-        ]
-      }
-    });
-
-    if (existing) {
-      return res.status(409).json({ error: 'User already exists' });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const newUser = await prisma.user.create({
-      data: {
-        name,
-        username: employeeNumber, // ✅ Added
-        email,
-        employeeNumber,
-        password: hashedPassword,
-        role: role || 'CLIENT'
-      }
-    });
-
-
-    res.status(201).json({ message: 'Registered successfully', user: { id: newUser.id, name: newUser.name, email: newUser.email } });
-  } catch (err) {
-    console.error('❌ Register error:', err);
-    res.status(500).json({ error: 'Failed to register user' });
-  }
-});
 
 // —–– PROTECTED: Change password
 app.put('/api/change-password', authenticate, async (req, res) => {
