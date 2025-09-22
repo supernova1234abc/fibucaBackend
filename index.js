@@ -444,10 +444,11 @@ app.post('/bulk-upload', async (req, res) => {
 
 const { removeBackground } = require('./py-tools/utils/runPython');
 
+
 app.post('/api/idcards/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   const { userId, fullName, company, role, cardNumber } = req.body;
 
-  // Only allow user to upload their own photo unless SUPERADMIN
+  // Restrict CLIENTs to only upload their own photo
   if (req.user.role === 'CLIENT' && req.user.id !== parseInt(userId)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
@@ -459,14 +460,19 @@ app.post('/api/idcards/photo', authenticate, uploadPhoto.single('photo'), async 
   try {
     await removeBackground(originalPath, cleanedPath);
 
+    // Delete original photo after cleaning
+    fs.unlink(originalPath, (err) => {
+      if (err) console.warn(`⚠️ Failed to delete original photo: ${originalPath}`, err.message);
+    });
+
     const relativeUrl = path.posix.join('photos', cleanedFilename);
     const card = await prisma.idCard.create({
       data: {
         userId: parseInt(userId),
-        fullName,
-        company,
-        role,
-        cardNumber,
+        fullName: fullName || null,
+        company: company || null,
+        role: role || null,
+        cardNumber: cardNumber || null,
         photoUrl: relativeUrl
       }
     });
@@ -477,6 +483,7 @@ app.post('/api/idcards/photo', authenticate, uploadPhoto.single('photo'), async 
     res.status(500).json({ error: 'Failed to process photo or create ID card' });
   }
 });
+
 
 app.post('/api/idcards', async (req, res) => {
   const { userId, fullName, photoUrl, company, role, cardNumber } = req.body;
@@ -509,8 +516,8 @@ app.post('/api/idcards', async (req, res) => {
  * ✅ PUT /api/idcards/:id/photo
  * Updates an existing IdCard’s photoUrl
  */
-app.put(
-  '/api/idcards/:id/photo',
+
+app.put('/api/idcards/:id/photo',
   uploadPhoto.single('photo'),
   async (req, res) => {
     const id = parseInt(req.params.id);
@@ -519,8 +526,8 @@ app.put(
     }
 
     try {
-      const filename = req.file.filename; // e.g. '1623456789012.png'
-      const relativeUrl = path.posix.join('photos', filename);
+      const filename = req.file.filename; 
+      const relativeUrl = `/photos/${filename}`;  // ✅ clean URL
       const updated = await prisma.idCard.update({
         where: { id },
         data: { photoUrl: relativeUrl }
@@ -532,7 +539,6 @@ app.put(
     }
   }
 );
-
 app.put('/api/idcards/:id/clean-photo', async (req, res) => {
   const id = parseInt(req.params.id);
 
@@ -543,16 +549,19 @@ app.put('/api/idcards/:id/clean-photo', async (req, res) => {
       return res.status(404).json({ error: 'ID card or photo not found' });
     }
 
-    const originalPath = path.join(__dirname, card.photoUrl); // photoUrl is already 'photos/filename'
+    // Extract just the filename from /photos/filename.png
+    const filename = path.basename(card.photoUrl);
+
+    const originalPath = path.join(__dirname, 'photos', filename); // ✅ filesystem path
     const cleanedFilename = `${Date.now()}-cleaned.png`;
     const cleanedPath = path.join(__dirname, 'photos', cleanedFilename);
 
     await removeBackground(originalPath, cleanedPath);
 
-    const relativeUrl = path.posix.join('photos', cleanedFilename);
+    const relativeUrl = `/photos/${cleanedFilename}`; // ✅ URL to serve
     const updated = await prisma.idCard.update({
       where: { id },
-      data: { photoUrl: relativeUrl } // always store as 'photos/filename'
+      data: { photoUrl: relativeUrl }
     });
 
     res.json({ message: 'Photo cleaned and updated', card: updated });
@@ -563,6 +572,7 @@ app.put('/api/idcards/:id/clean-photo', async (req, res) => {
 });
 
 
+
 /**
  * ✅ DELETE /api/idcards/:id
  * Delete an ID card
@@ -570,8 +580,29 @@ app.put('/api/idcards/:id/clean-photo', async (req, res) => {
 app.delete('/api/idcards/:id', async (req, res) => {
   const id = parseInt(req.params.id);
   try {
+    // 1. Get the record before deleting
+    const card = await prisma.idCard.findUnique({ where: { id } });
+
+    if (!card) {
+      return res.status(404).json({ error: 'ID card not found' });
+    }
+
+    // 2. Delete the record
     await prisma.idCard.delete({ where: { id } });
-    res.json({ message: 'ID card deleted' });
+
+    // 3. Delete the photo file if exists
+    if (card.photoUrl) {
+      const photoPath = path.join(__dirname, card.photoUrl);
+      fs.unlink(photoPath, (err) => {
+        if (err) {
+          console.warn(`⚠️ Failed to delete photo file: ${photoPath}`, err.message);
+        } else {
+          console.log(`🗑️ Deleted photo file: ${photoPath}`);
+        }
+      });
+    }
+
+    res.json({ message: 'ID card and photo deleted' });
   } catch (err) {
     console.error('❌ Delete ID card error:', err);
     res.status(500).json({ error: 'Failed to delete ID card' });
