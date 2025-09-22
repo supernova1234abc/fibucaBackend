@@ -186,14 +186,15 @@ app.get('/api/me', authenticate, async (req, res) => {
 })
 
 // Logout
-app.post('/api/logout', authenticate, (req, res) => {
+app.post('/api/logout', (req, res) => {
   res.clearCookie('fibuca_token', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'none'
-  })
-  res.json({ message: 'Logged out' })
-})
+  });
+  res.status(200).json({ message: 'Logged out' });
+});
+
 
 // ✅ REGISTER NEW USER after form submission
 app.post('/register', async (req, res) => {
