@@ -15,14 +15,20 @@ const prisma = new PrismaClient()
 const PORT = process.env.PORT
 const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 
-// --------------------
-// CORS + JSON + Cookies
-// --------------------
-app.use(cors({
-  origin: process.env.VITE_FRONTEND_URL,  // e.g. http://localhost:5173 or prod domain
-  credentials: true,                      // required for cookies/auth headers
-}));
+// Allow your frontend URL(s) to access backend
+const allowedOrigins = [
+  process.env.VITE_FRONTEND_URL || 'http://localhost:5173', // dev
+  'https://fibuca-frontend.vercel.app',                     // prod
+]
 
+app.use(cors({
+  origin: allowedOrigins,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true, // allow cookies/auth headers
+}))
+
+// Parse JSON / URL-encoded requests
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 app.use(cookieParser())
@@ -32,6 +38,15 @@ app.use(cookieParser())
 // --------------------
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
 app.use('/photos', express.static(path.join(__dirname, 'photos')))
+
+// --------------------
+// Optional: preflight for all routes
+// --------------------
+app.options('*', cors({
+  origin: allowedOrigins,
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  credentials: true,
+}))
 
 // --------------------
 // Multer setup
