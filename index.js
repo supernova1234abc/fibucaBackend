@@ -1,4 +1,5 @@
 // backend/index.js
+
 const express = require('express')
 const cors = require('cors')
 const cookieParser = require('cookie-parser')
@@ -15,18 +16,23 @@ const prisma = new PrismaClient()
 const PORT = process.env.PORT
 const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 
-// Allow your frontend URL(s) to access backend
+// --------------------
+// CORS
+// --------------------
 const allowedOrigins = [
-  process.env.VITE_FRONTEND_URL || 'http://localhost:5173', // dev
-  'https://fibuca-frontend.vercel.app',                     // prod
-]
+  process.env.VITE_FRONTEND_URL || 'http://localhost:5173',
+  'https://fibuca-frontend.vercel.app'
+];
 
 app.use(cors({
   origin: allowedOrigins,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true, // allow cookies/auth headers
-}))
+  credentials: true
+}));
+
+app.options('*', cors({ origin: allowedOrigins, credentials: true }));
+
 
 // Parse JSON / URL-encoded requests
 app.use(express.json())
@@ -460,35 +466,23 @@ app.post('/bulk-upload', async (req, res) => {
 const { removeBackground } = require('./py-tools/utils/runPython');
 
 
-app.post('/api/idcards/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
+app.post('/api/idcards/photo', uploadPhoto.single('photo'), async (req, res) => {
   const { userId, fullName, company, role, cardNumber } = req.body;
-
-  // Restrict CLIENTs to only upload their own photo
-  if (req.user.role === 'CLIENT' && req.user.id !== parseInt(userId)) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
   const originalPath = req.file.path;
   const cleanedFilename = `${Date.now()}-cleaned.png`;
-  const cleanedPath = path.join(__dirname, 'photos', cleanedFilename);
+  const cleanedPath = path.join('photos', cleanedFilename);
 
   try {
     await removeBackground(originalPath, cleanedPath);
 
-    // Delete original photo after cleaning
-    fs.unlink(originalPath, (err) => {
-      if (err) console.warn(`⚠️ Failed to delete original photo: ${originalPath}`, err.message);
-    });
-
-    const relativeUrl = path.posix.join('photos', cleanedFilename);
     const card = await prisma.idCard.create({
       data: {
         userId: parseInt(userId),
-        fullName: fullName || null,
-        company: company || null,
-        role: role || null,
-        cardNumber: cardNumber || null,
-        photoUrl: relativeUrl
+        fullName,
+        company,
+        role,
+        cardNumber,
+        photoUrl: cleanedPath
       }
     });
 
@@ -554,37 +548,39 @@ app.put('/api/idcards/:id/photo',
     }
   }
 );
+// Example: PUT /api/idcards/:id/clean-photo
 app.put('/api/idcards/:id/clean-photo', async (req, res) => {
   const id = parseInt(req.params.id);
-
   try {
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card || !card.photoUrl) {
-      console.warn(`⚠️ No photo found for ID ${id}`);
       return res.status(404).json({ error: 'ID card or photo not found' });
     }
 
-    // Extract just the filename from /photos/filename.png
-    const filename = path.basename(card.photoUrl);
+    // Absolute path for removeBackground
+    const originalPath = path.join(__dirname, card.photoUrl);
+    if (!fs.existsSync(originalPath)) {
+      return res.status(404).json({ error: 'Original photo file missing' });
+    }
 
-    const originalPath = path.join(__dirname, 'photos', filename); // ✅ filesystem path
+    // Cleaned filename & path
     const cleanedFilename = `${Date.now()}-cleaned.png`;
-    const cleanedPath = path.join(__dirname, 'photos', cleanedFilename);
+    const cleanedPath = path.join('photos', cleanedFilename);
 
     await removeBackground(originalPath, cleanedPath);
 
-    const relativeUrl = `/photos/${cleanedFilename}`; // ✅ URL to serve
     const updated = await prisma.idCard.update({
       where: { id },
-      data: { photoUrl: relativeUrl }
+      data: { photoUrl: cleanedPath }
     });
 
     res.json({ message: 'Photo cleaned and updated', card: updated });
   } catch (err) {
-    console.error('❌ Background removal failed:', err.message || err);
+    console.error('❌ Background removal failed:', err);
     res.status(500).json({ error: 'Failed to clean photo' });
   }
 });
+
 
 
 
