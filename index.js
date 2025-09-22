@@ -20,17 +20,22 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 // CORS
 // --------------------
 const allowedOrigins = [
-  process.env.VITE_FRONTEND_URL || 'http://localhost:5173',
-  'https://fibuca-frontend.vercel.app'
+  process.env.FRONTEND_URL || "http://localhost:5173",
+  "https://fibuca-frontend.vercel.app"
 ];
 
 app.use(cors({
-  origin: allowedOrigins,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+  origin: function(origin, callback){
+    // allow requests with no origin (like Postman)
+    if(!origin) return callback(null, true);
+    if(allowedOrigins.indexOf(origin) === -1){
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
+  credentials: true,
 }));
-
 app.options('*', cors({ origin: allowedOrigins, credentials: true }));
 
 
@@ -526,60 +531,90 @@ app.post('/api/idcards', async (req, res) => {
  * Updates an existing IdCard’s photoUrl
  */
 
-app.put('/api/idcards/:id/photo',
-  uploadPhoto.single('photo'),
-  async (req, res) => {
-    const id = parseInt(req.params.id);
-    if (!req.file) {
-      return res.status(400).json({ error: 'No photo uploaded' });
-    }
+// ✅ PUT /api/idcards/:id/photo
+// Upload a new photo for an existing ID card, clean background, and update DB
+app.put('/api/idcards/:id/photo', uploadPhoto.single('photo'), async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
 
-    try {
-      const filename = req.file.filename; 
-      const relativeUrl = `/photos/${filename}`;  // ✅ clean URL
-      const updated = await prisma.idCard.update({
-        where: { id },
-        data: { photoUrl: relativeUrl }
-      });
-      res.json({ message: 'Photo updated', card: updated });
-    } catch (err) {
-      console.error('❌ Update ID card photo failed:', err);
-      res.status(500).json({ error: 'Failed to update ID card photo' });
-    }
+  if (!req.file) {
+    return res.status(400).json({ error: 'No photo uploaded' });
   }
-);
-// Example: PUT /api/idcards/:id/clean-photo
+
+  try {
+    // 1️⃣ Resolve filesystem path for uploaded file
+    const originalPath = req.file.path; // multer already stores it
+    const cleanedFilename = `${Date.now()}-cleaned.png`;
+    const cleanedPath = path.join(__dirname, 'photos', cleanedFilename);
+    const cleanedUrl = `/photos/${cleanedFilename}`; // URL for frontend
+
+    // 2️⃣ Run background removal
+    await removeBackground(originalPath, cleanedPath);
+
+    // 3️⃣ Update DB with cleaned photo URL
+    const updatedCard = await prisma.idCard.update({
+      where: { id },
+      data: { photoUrl: cleanedUrl }
+    });
+
+    console.log(`✅ Photo uploaded & cleaned: ${cleanedPath}`);
+    res.json({
+      message: 'Photo uploaded and background cleaned',
+      card: updatedCard
+    });
+
+  } catch (err) {
+    console.error('❌ Photo upload or background removal failed:', err);
+    res.status(500).json({ error: 'Failed to upload or clean photo', details: err.message || err });
+  }
+});
+
+
+
+// ✅ PUT /api/idcards/:id/clean-photo
 app.put('/api/idcards/:id/clean-photo', async (req, res) => {
   const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
+
   try {
+    // 1️⃣ Find ID card
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card || !card.photoUrl) {
+      console.warn(`⚠️ No photo found for ID ${id}`);
       return res.status(404).json({ error: 'ID card or photo not found' });
     }
 
-    // Absolute path for removeBackground
+    // 2️⃣ Resolve absolute path of original photo
+    // card.photoUrl is like "/photos/123456.png"
     const originalPath = path.join(__dirname, card.photoUrl);
     if (!fs.existsSync(originalPath)) {
+      console.error('❌ Original photo file missing:', originalPath);
       return res.status(404).json({ error: 'Original photo file missing' });
     }
 
-    // Cleaned filename & path
+    // 3️⃣ Define cleaned photo path
     const cleanedFilename = `${Date.now()}-cleaned.png`;
-    const cleanedPath = path.join('photos', cleanedFilename);
+    const cleanedPath = path.join(__dirname, 'photos', cleanedFilename); // filesystem path
+    const cleanedUrl = `/photos/${cleanedFilename}`;                        // URL path for frontend
 
+    // 4️⃣ Run background removal
     await removeBackground(originalPath, cleanedPath);
 
+    // 5️⃣ Update DB
     const updated = await prisma.idCard.update({
       where: { id },
-      data: { photoUrl: cleanedPath }
+      data: { photoUrl: cleanedUrl }
     });
 
+    console.log(`✅ Cleaned photo saved: ${cleanedPath}`);
     res.json({ message: 'Photo cleaned and updated', card: updated });
+
   } catch (err) {
     console.error('❌ Background removal failed:', err);
-    res.status(500).json({ error: 'Failed to clean photo' });
+    res.status(500).json({ error: 'Failed to clean photo', details: err.message || err });
   }
 });
+
 
 
 
