@@ -258,7 +258,8 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
   try {
     // 1️⃣ Parse the form and save PDF path
     const form = JSON.parse(req.body.data);
-    const pdfPath = req.file.path;
+    //const pdfPath = req.file.path;
+    const pdfPath = req.file.path.replace(/\\/g, '/'); // normalize slashes
 
     // 2️⃣ Create the Submission record
     const submission = await prisma.submission.create({
@@ -334,20 +335,24 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
     }
 
     // 5️⃣ Respond with everything the front-end needs
-    res.status(200).json({
-      message: 'Form submitted, user registered & placeholder ID card created',
-      submission,
-      user: {
-        id: user.id,
-        name: user.name,
-        employeeNumber: user.employeeNumber,
-        role: user.role,
-        firstLogin: user.firstLogin,
-        pdfPath
-      },
-      loginCredentials: tempPassword ? { username: user.username, password: tempPassword } : null,
-      idCard: placeholderCard
-    });
+
+// Build full URL (so frontend doesn't need to guess)
+const pdfUrl = `${process.env.BASE_URL || 'https://fibucabackend.onrender.com'}/${pdfPath}`;
+
+res.status(200).json({
+  message: 'Form submitted...',
+  submission,
+  user: {
+    id: user.id,
+    name: user.name,
+    employeeNumber: user.employeeNumber,
+    role: user.role,
+    firstLogin: user.firstLogin,
+    pdfUrl,   // ✅ full URL
+  },
+  loginCredentials: tempPassword ? { username: user.username, password: tempPassword } : null,
+  idCard: placeholderCard
+});
   } catch (err) {
     console.error('❌ Submission error:', err);
     res.status(500).json({ error: 'Failed to submit form' });
