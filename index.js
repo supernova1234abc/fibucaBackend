@@ -9,6 +9,7 @@ const jwt = require('jsonwebtoken')
 const bcrypt = require('bcrypt')
 const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
+const supabase = require('./supabaseClient');
 
 const app = express()
 const prisma = new PrismaClient()
