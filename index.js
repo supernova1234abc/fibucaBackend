@@ -441,61 +441,64 @@ app.post('/api/idcards', authenticate, async (req, res) => {
   }
 });
 
+
+
+
 // ---------- PUT /api/idcards/:id/photo (upload + clean + update DB) ----------
+
+const { createClient } = require('@supabase/supabase-js');
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY // Use SERVICE ROLE key in backend only
+);
+
 app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
-
   if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
 
-  // Protect CLIENTs to update only their own card
-  try {
-    const card = await prisma.idCard.findUnique({ where: { id } });
-    if (!card) return res.status(404).json({ error: 'ID card not found' });
-
-    // If user is CLIENT, ensure it belongs to them
-    if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
-      // cleanup uploaded file to avoid orphan
-      try { fs.unlinkSync(req.file.path); } catch (e) { }
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-  } catch (err) {
-    console.error('❌ Checking card ownership failed:', err);
-    try { fs.unlinkSync(req.file.path); } catch (e) { }
-    return res.status(500).json({ error: 'Server error' });
+  let card = await prisma.idCard.findUnique({ where: { id } });
+  if (!card) return res.status(404).json({ error: 'ID card not found' });
+  if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
+    fs.unlinkSync(req.file.path);
+    return res.status(403).json({ error: 'Forbidden' });
   }
 
-  const originalPath = req.file.path; // absolute or relative path from multer
+  const originalPath = req.file.path;
   const cleanedFilename = `${Date.now()}-cleaned.png`;
-  const cleanedPath = path.join(__dirname, 'photos', cleanedFilename); // filesystem path
-  const cleanedUrl = `/photos/${cleanedFilename}`; // what we store in DB / send to frontend
 
   try {
-    // Run your python background remover (blocking until done)
-    await removeBackground(originalPath, cleanedPath);
+    // 1. Run Python background removal (local)
+    const cleanedTempPath = path.join('/tmp', cleanedFilename);
+    await removeBackground(originalPath, cleanedTempPath);
 
-    // delete original uploaded file to save space
-    fs.unlink(originalPath, (err) => {
-      if (err) console.warn('⚠️ Failed to delete original upload:', originalPath, err.message);
-    });
+    // 2. Upload to Supabase Storage
+    const fileContent = fs.readFileSync(cleanedTempPath);
+    const { data, error } = await supabase.storage
+      .from('idcards')
+      .upload(cleanedFilename, fileContent, { contentType: 'image/png', upsert: true });
 
-    // Update DB record with cleaned URL
+    if (error) throw error;
+
+    // 3. Delete temp files
+    fs.unlinkSync(originalPath);
+    fs.unlinkSync(cleanedTempPath);
+
+    // 4. Get public URL and save to DB
+    const photoUrl = supabase.storage.from('idcards').getPublicUrl(cleanedFilename).data.publicUrl;
+
     const updatedCard = await prisma.idCard.update({
       where: { id },
-      data: { photoUrl: cleanedUrl }
+      data: { photoUrl }
     });
 
-    res.json({
-      message: 'Photo uploaded and cleaned',
-      card: updatedCard
-    });
+    res.json({ message: 'Photo uploaded, cleaned & stored!', card: updatedCard });
   } catch (err) {
-    console.error('❌ PUT /api/idcards/:id/photo failed:', err);
-    // attempt cleanup of any produced cleaned file
-    try { if (fs.existsSync(cleanedPath)) fs.unlinkSync(cleanedPath); } catch (e) { }
-    // also try to remove original
-    try { if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath); } catch (e) { }
-    res.status(500).json({ error: 'Failed to process photo', details: err.message || err });
+    console.error(err);
+    // Cleanup temp files if exist
+    [originalPath, cleanedTempPath].forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
+    res.status(500).json({ error: 'Failed to process photo', details: err.message });
   }
 });
 
