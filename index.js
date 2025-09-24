@@ -257,10 +257,9 @@ const upload = multer({ storage });
  */
 app.post('/submit-form', upload.single('pdf'), async (req, res) => {
   try {
-    // 1️⃣ Parse the form and save PDF path
+    // 1️⃣ Parse the form and normalize PDF path
     const form = JSON.parse(req.body.data);
     const pdfPath = req.file.path.replace(/\\/g, '/'); // normalize slashes
-
 
     // 2️⃣ Create the Submission record
     const submission = await prisma.submission.create({
@@ -270,52 +269,40 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
         employerName: form.employerName,
         dues: form.dues,
         witness: form.witness,
-        pdfPath,
+        pdfPath, // store relative path in DB
         submittedAt: new Date()
       }
     });
 
-    // 3️⃣ Check if user already exists
-    let user, tempPassword, hashedPassword;
-    try {
-      user = await prisma.user.findUnique({ where: { username: form.employeeNumber } });
-    } catch (err) {
-      user = null;
-    }
+    // 3️⃣ Check if user exists, else create
+    let user, tempPassword;
+    user = await prisma.user.findUnique({ where: { username: form.employeeNumber } });
     if (!user) {
-      const suffix = Math.floor(1000 + Math.random() * 9000).toString();
+      const suffix = Math.floor(1000 + Math.random() * 9000);
       tempPassword = form.employeeNumber + suffix;
-      hashedPassword = await bcrypt.hash(tempPassword, 10);
-      try {
-        user = await prisma.user.create({
-          data: {
-            name: form.employeeName,
-            username: form.employeeNumber,
-            email: `${form.employeeNumber}@fibuca.com`,
-            password: hashedPassword,
-            employeeNumber: form.employeeNumber,
-            role: 'CLIENT'
-          }
-        });
-      } catch (err) {
-        if (err.code === 'P2002') {
-          return res.status(409).json({ error: 'A user with this employee number already exists.' });
+      const hashedPassword = await bcrypt.hash(tempPassword.toString(), 10);
+
+      user = await prisma.user.create({
+        data: {
+          name: form.employeeName,
+          username: form.employeeNumber,
+          email: `${form.employeeNumber}@fibuca.com`,
+          password: hashedPassword,
+          employeeNumber: form.employeeNumber,
+          role: 'CLIENT'
         }
-        throw err;
-      }
-    } else {
-      tempPassword = null;
+      });
     }
 
-    // 4️⃣ Immediately generate a placeholder IdCard record if not exists
-    function makeCardNumber() {
+    // 4️⃣ Generate placeholder ID card if not exists
+    const makeCardNumber = () => {
       const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
       const prefix = Array.from({ length: 2 })
         .map(() => letters[Math.floor(Math.random() * letters.length)])
         .join('');
       const digits = Math.floor(100000 + Math.random() * 900000);
       return `FIBUCA${prefix}${digits}`;
-    }
+    };
 
     let placeholderCard = await prisma.idCard.findFirst({ where: { userId: user.id } });
     if (!placeholderCard) {
@@ -332,10 +319,11 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
       });
     }
 
-    // 5️⃣ Build full URL (so frontend doesn't need to guess)
-    const pdfUrl = `${process.env.BASE_URL || 'https://fibucabackend.onrender.com'}/${pdfPath}`;
+    // 5️⃣ Build PDF URL using BASE_URL from .env
+    const BASE_URL = process.env.BASE_URL || 'https://fibucabackend.onrender.com';
+    const pdfUrl = `${BASE_URL}/${pdfPath.startsWith('uploads/') ? pdfPath : `uploads/${path.basename(pdfPath)}`}`;
 
-    // 6️⃣ Respond
+    // 6️⃣ Respond to frontend
     res.status(200).json({
       message: 'Form submitted, user registered & placeholder ID card created',
       submission,
@@ -345,7 +333,7 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
         employeeNumber: user.employeeNumber,
         role: user.role,
         firstLogin: user.firstLogin,
-        pdfUrl, // ✅ now actually defined
+        pdfUrl
       },
       loginCredentials: tempPassword ? { username: user.username, password: tempPassword } : null,
       idCard: placeholderCard
@@ -355,6 +343,7 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
     res.status(500).json({ error: 'Failed to submit form' });
   }
 });
+
 
 
 /**
