@@ -253,22 +253,23 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
   try {
     // 1️⃣ Parse the form
     const form = JSON.parse(req.body.data);
-    if (!req.file) {
-      return res.status(400).json({ error: "No PDF uploaded" });
-    }
+    if (!req.file) return res.status(400).json({ error: "No PDF uploaded" });
 
-    // 2️⃣ Upload PDF to Supabase "uploads" bucket
-    //const pdfFileName = `${Date.now()}-${form.employeeNumber}.pdf`;
+    // 2️⃣ Get the PDF content from Multer
+    const pdfBlob = req.file.buffer; // <-- fix: define pdfBlob
+
+    // 3️⃣ Upload PDF to Supabase "uploads" bucket
+    const fileName = `forms/${form.employeeNumber}_form.pdf`;
     const { data, error } = await supabase.storage
-      .from('uploads')  // your bucket name
-      .upload(`forms/${form.employeeNumber}_form.pdf`, pdfBlob, { contentType: 'application/pdf', upsert: true });
-
+      .from("uploads")
+      .upload(fileName, pdfBlob, { contentType: "application/pdf", upsert: true });
     if (error) throw error;
 
-    // Get public URL
-    const pdfUrl = supabase.storage.from('uploads').getPublicUrl(`forms/${form.employeeNumber}_form.pdf`).data.publicUrl;
+    // 4️⃣ Get public URL
+    const { data: urlData } = supabase.storage.from("uploads").getPublicUrl(fileName);
+    const pdfUrl = urlData.publicUrl;
 
-    // 4️⃣ Create the Submission record
+    // 5️⃣ Create the Submission record
     const submission = await prisma.submission.create({
       data: {
         employeeName: form.employeeName,
@@ -276,16 +277,14 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
         employerName: form.employerName,
         dues: form.dues,
         witness: form.witness,
-        pdfPath: pdfUrl,  // store full public URL
+        pdfPath: pdfUrl,
         submittedAt: new Date(),
       },
     });
 
-    // 5️⃣ Check if user exists, else create
+    // 6️⃣ Check if user exists, else create
     let user, tempPassword;
-    user = await prisma.user.findUnique({
-      where: { username: form.employeeNumber },
-    });
+    user = await prisma.user.findUnique({ where: { username: form.employeeNumber } });
     if (!user) {
       const suffix = Math.floor(1000 + Math.random() * 9000);
       tempPassword = form.employeeNumber + suffix;
@@ -303,7 +302,7 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       });
     }
 
-    // 6️⃣ Generate placeholder ID card if not exists
+    // 7️⃣ Generate placeholder ID card if not exists
     const makeCardNumber = () => {
       const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
       const prefix = Array.from({ length: 2 })
@@ -313,9 +312,7 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       return `FIBUCA${prefix}${digits}`;
     };
 
-    let placeholderCard = await prisma.idCard.findFirst({
-      where: { userId: user.id },
-    });
+    let placeholderCard = await prisma.idCard.findFirst({ where: { userId: user.id } });
     if (!placeholderCard) {
       placeholderCard = await prisma.idCard.create({
         data: {
@@ -330,7 +327,7 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       });
     }
 
-    // 7️⃣ Respond to frontend
+    // 8️⃣ Respond to frontend
     res.status(200).json({
       message: "Form submitted, user registered & placeholder ID card created",
       submission,
@@ -352,7 +349,6 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
     res.status(500).json({ error: "Failed to submit form", details: err.message });
   }
 });
-
 
 
 
