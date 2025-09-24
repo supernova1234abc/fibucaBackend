@@ -258,20 +258,15 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
     }
 
     // 2️⃣ Upload PDF to Supabase "uploads" bucket
-    const pdfFileName = `${Date.now()}-${form.employeeNumber}.pdf`;
-    const { error: pdfError } = await supabase.storage
-      .from("uploads")
-      .upload(pdfFileName, req.file.buffer, {
-        contentType: "application/pdf",
-        upsert: true,
-      });
+    //const pdfFileName = `${Date.now()}-${form.employeeNumber}.pdf`;
+    const { data, error } = await supabase.storage
+      .from('uploads')  // your bucket name
+      .upload(`forms/${form.employeeNumber}_form.pdf`, pdfBlob, { contentType: 'application/pdf', upsert: true });
 
-    if (pdfError) throw pdfError;
+    if (error) throw error;
 
-    // 3️⃣ Get public URL of uploaded PDF
-    const {
-      data: { publicUrl: pdfUrl },
-    } = supabase.storage.from("uploads").getPublicUrl(pdfFileName);
+    // Get public URL
+    const pdfUrl = supabase.storage.from('uploads').getPublicUrl(`forms/${form.employeeNumber}_form.pdf`).data.publicUrl;
 
     // 4️⃣ Create the Submission record
     const submission = await prisma.submission.create({
@@ -281,7 +276,7 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
         employerName: form.employerName,
         dues: form.dues,
         witness: form.witness,
-        pdfPath: pdfFileName, // store filename only
+        pdfPath: pdfUrl,  // store full public URL
         submittedAt: new Date(),
       },
     });
