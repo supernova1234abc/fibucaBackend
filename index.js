@@ -15,7 +15,6 @@ const app = express()
 const prisma = new PrismaClient()
 const PORT = process.env.PORT
 const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
-const pdfUrl = `${process.env.BASE_URL || 'https://fibucabackend.onrender.com'}/${pdfPath}`;
 
 //cors
 const allowedOrigins = [
@@ -261,6 +260,7 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
     // 1️⃣ Parse the form and save PDF path
     const form = JSON.parse(req.body.data);
     const pdfPath = req.file.path.replace(/\\/g, '/'); // normalize slashes
+
 
     // 2️⃣ Create the Submission record
     const submission = await prisma.submission.create({
