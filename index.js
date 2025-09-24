@@ -47,6 +47,7 @@ app.use('/photos', express.static(path.join(__dirname, 'photos')))
 // --------------------
 // Multer setup
 // --------------------
+/*
 const pdfStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     const dir = './uploads';
@@ -71,6 +72,11 @@ const photoStorage = multer.diskStorage({
   }
 })
 const uploadPhoto = multer({ storage: photoStorage })
+*/
+
+// ✅ Use memory storage instead of disk for all uploads
+const uploadPDF = multer({ storage: multer.memoryStorage() });
+const uploadPhoto = multer({ storage: multer.memoryStorage() });
 
 // --------------------
 // Auth middleware
@@ -233,18 +239,6 @@ app.put('/api/change-password', authenticate, async (req, res) => {
 
 
 
-// Configure PDF upload
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = './uploads';
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
-  }
-});
-const upload = multer({ storage });
 
 
 
@@ -254,13 +248,31 @@ const upload = multer({ storage });
  * Receives form data + PDF and saves to database
  * Also auto-creates a placeholder IdCard record
  */
-app.post('/submit-form', upload.single('pdf'), async (req, res) => {
+app.post("/submit-form", upload.single("pdf"), async (req, res) => {
   try {
-    // 1️⃣ Parse the form and normalize PDF path
+    // 1️⃣ Parse the form
     const form = JSON.parse(req.body.data);
-    const pdfPath = req.file.path.replace(/\\/g, '/'); // normalize slashes
+    if (!req.file) {
+      return res.status(400).json({ error: "No PDF uploaded" });
+    }
 
-    // 2️⃣ Create the Submission record
+    // 2️⃣ Upload PDF to Supabase "uploads" bucket
+    const pdfFileName = `${Date.now()}-${form.employeeNumber}.pdf`;
+    const { error: pdfError } = await supabase.storage
+      .from("uploads")
+      .upload(pdfFileName, req.file.buffer, {
+        contentType: "application/pdf",
+        upsert: true,
+      });
+
+    if (pdfError) throw pdfError;
+
+    // 3️⃣ Get public URL of uploaded PDF
+    const {
+      data: { publicUrl: pdfUrl },
+    } = supabase.storage.from("uploads").getPublicUrl(pdfFileName);
+
+    // 4️⃣ Create the Submission record
     const submission = await prisma.submission.create({
       data: {
         employeeName: form.employeeName,
@@ -268,14 +280,16 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
         employerName: form.employerName,
         dues: form.dues,
         witness: form.witness,
-        pdfPath, // store relative path in DB
-        submittedAt: new Date()
-      }
+        pdfPath: pdfFileName, // store filename only
+        submittedAt: new Date(),
+      },
     });
 
-    // 3️⃣ Check if user exists, else create
+    // 5️⃣ Check if user exists, else create
     let user, tempPassword;
-    user = await prisma.user.findUnique({ where: { username: form.employeeNumber } });
+    user = await prisma.user.findUnique({
+      where: { username: form.employeeNumber },
+    });
     if (!user) {
       const suffix = Math.floor(1000 + Math.random() * 9000);
       tempPassword = form.employeeNumber + suffix;
@@ -288,43 +302,41 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
           email: `${form.employeeNumber}@fibuca.com`,
           password: hashedPassword,
           employeeNumber: form.employeeNumber,
-          role: 'CLIENT'
-        }
+          role: "CLIENT",
+        },
       });
     }
 
-    // 4️⃣ Generate placeholder ID card if not exists
+    // 6️⃣ Generate placeholder ID card if not exists
     const makeCardNumber = () => {
-      const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
       const prefix = Array.from({ length: 2 })
         .map(() => letters[Math.floor(Math.random() * letters.length)])
-        .join('');
+        .join("");
       const digits = Math.floor(100000 + Math.random() * 900000);
       return `FIBUCA${prefix}${digits}`;
     };
 
-    let placeholderCard = await prisma.idCard.findFirst({ where: { userId: user.id } });
+    let placeholderCard = await prisma.idCard.findFirst({
+      where: { userId: user.id },
+    });
     if (!placeholderCard) {
       placeholderCard = await prisma.idCard.create({
         data: {
           userId: user.id,
           fullName: user.name,
-          photoUrl: '',
+          photoUrl: "",
           company: submission.employerName,
-          role: 'Member',
+          role: "Member",
           issuedAt: new Date(),
-          cardNumber: makeCardNumber()
-        }
+          cardNumber: makeCardNumber(),
+        },
       });
     }
 
-    // 5️⃣ Build PDF URL using BASE_URL from .env
-    const BASE_URL = process.env.BASE_URL || 'https://fibucabackend.onrender.com';
-    const pdfUrl = `${BASE_URL}/${pdfPath.startsWith('uploads/') ? pdfPath : `uploads/${path.basename(pdfPath)}`}`;
-
-    // 6️⃣ Respond to frontend
+    // 7️⃣ Respond to frontend
     res.status(200).json({
-      message: 'Form submitted, user registered & placeholder ID card created',
+      message: "Form submitted, user registered & placeholder ID card created",
       submission,
       user: {
         id: user.id,
@@ -332,16 +344,19 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
         employeeNumber: user.employeeNumber,
         role: user.role,
         firstLogin: user.firstLogin,
-        pdfUrl
+        pdfUrl,
       },
-      loginCredentials: tempPassword ? { username: user.username, password: tempPassword } : null,
-      idCard: placeholderCard
+      loginCredentials: tempPassword
+        ? { username: user.username, password: tempPassword }
+        : null,
+      idCard: placeholderCard,
     });
   } catch (err) {
-    console.error('❌ Submission error:', err);
-    res.status(500).json({ error: 'Failed to submit form' });
+    console.error("❌ Submission error:", err);
+    res.status(500).json({ error: "Failed to submit form", details: err.message });
   }
 });
+
 
 
 
@@ -378,6 +393,8 @@ app.post('/bulk-upload', async (req, res) => {
   }
 });
 
+
+
 /**
  * ✅ POST /api/idcards
  * Create a new ID card
@@ -389,15 +406,12 @@ const { removeBackground } = require('./py-tools/utils/runPython');
 // ---------- helper: safe filename + multer limits (optional: keep if not present) ----------
 const MAX_PHOTO_BYTES = 3 * 1024 * 1024; // 3MB
 
-
-
-// ---------- GET /api/idcards/:userId (protected) ----------
+// ---------- GET /api/idcards/:userId ----------
 app.get('/api/idcards/:userId', authenticate, async (req, res) => {
   try {
     const uid = parseInt(req.params.userId);
     if (isNaN(uid)) return res.status(400).json({ error: 'Invalid userId' });
 
-    // CLIENTs can only fetch their own cards
     if (req.user.role === 'CLIENT' && req.user.id !== uid) {
       return res.status(403).json({ error: 'Forbidden' });
     }
@@ -414,10 +428,10 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
   }
 });
 
-// ---------- POST /api/idcards (create placeholder card without a photo) ----------
+// ---------- POST /api/idcards (create new card) ----------
 app.post('/api/idcards', authenticate, async (req, res) => {
   try {
-    const { userId, fullName, photoUrl = '', company, role, cardNumber } = req.body;
+    const { userId, fullName, company, role, cardNumber } = req.body;
     if (!userId || !fullName || !company || !role || !cardNumber) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
@@ -426,10 +440,10 @@ app.post('/api/idcards', authenticate, async (req, res) => {
       data: {
         userId: parseInt(userId),
         fullName,
-        photoUrl, // allow empty string or a URL like '/photos/xxx.png'
         company,
         role,
-        cardNumber
+        cardNumber,
+        photoUrl: ''
       }
     });
 
@@ -440,28 +454,7 @@ app.post('/api/idcards', authenticate, async (req, res) => {
   }
 });
 
-
-
-
-// ---------- PUT /api/idcards/:id/photo (upload + clean + update DB) ----------
-
-const { createClient } = require('@supabase/supabase-js');
-
-const supabaseUrl = process.env.VITE_APP_SUPABASE_URL;
-const supabaseKey = process.env.VITE_APP_SUPABASE_ANON_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error(
-    'Supabase config missing. Please set VITE_APP_SUPABASE_URL and VITE_APP_SUPABASE_ANON_KEY'
-  );
-}
-
-const supabase = createClient(supabaseUrl, supabaseKey);
-
-module.exports = { supabase };
-
-
-
+// ---------- PUT /api/idcards/:id/photo (upload + clean + store in Supabase) ----------
 app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
@@ -478,40 +471,41 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
   const cleanedFilename = `${Date.now()}-cleaned.png`;
 
   try {
-    // 1. Run Python background removal (local)
+    // 1. Clean photo
     const cleanedTempPath = path.join('/tmp', cleanedFilename);
     await removeBackground(originalPath, cleanedTempPath);
 
-    // 2. Upload to Supabase Storage
-    const fileContent = fs.readFileSync(cleanedTempPath);
-    const { data, error } = await supabase.storage
+    // 2. Upload to Supabase
+    const cleanedBuffer = fs.readFileSync(cleanedTempPath);
+    const { error: upErr } = await supabase.storage
       .from('idcards')
-      .upload(cleanedFilename, fileContent, { contentType: 'image/png', upsert: true });
+      .upload(cleanedFilename, cleanedBuffer, {
+        contentType: 'image/png',
+        upsert: true
+      });
+    if (upErr) throw upErr;
 
-    if (error) throw error;
-
-    // 3. Delete temp files
-    fs.unlinkSync(originalPath);
-    fs.unlinkSync(cleanedTempPath);
-
-    // 4. Get public URL and save to DB
+    // 3. Get public URL
     const photoUrl = supabase.storage.from('idcards').getPublicUrl(cleanedFilename).data.publicUrl;
 
+    // 4. Update DB
     const updatedCard = await prisma.idCard.update({
       where: { id },
       data: { photoUrl }
     });
 
+    // 5. Cleanup
+    [originalPath, cleanedTempPath].forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
+
     res.json({ message: 'Photo uploaded, cleaned & stored!', card: updatedCard });
   } catch (err) {
-    console.error(err);
-    // Cleanup temp files if exist
-    [originalPath, cleanedTempPath].forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
+    console.error('❌ PUT /api/idcards/:id/photo failed:', err);
+    [originalPath].forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
     res.status(500).json({ error: 'Failed to process photo', details: err.message });
   }
 });
 
-// ---------- PUT /api/idcards/:id/clean-photo (re-run cleaning on existing photo) ----------
+// ---------- PUT /api/idcards/:id/clean-photo (re-clean existing Supabase photo) ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
@@ -520,41 +514,44 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card || !card.photoUrl) return res.status(404).json({ error: 'ID card or photo not found' });
 
-    // Normalize: card.photoUrl should be '/photos/filename'
-    const currentUrl = card.photoUrl;
-    const filename = path.basename(currentUrl);
-    const originalPath = path.join(__dirname, 'photos', filename);
+    // 1. Download existing photo from Supabase
+    const filename = path.basename(card.photoUrl);
+    const { data: fileData, error: dlErr } = await supabase.storage.from('idcards').download(filename);
+    if (dlErr) throw dlErr;
 
-    if (!fs.existsSync(originalPath)) {
-      return res.status(404).json({ error: 'Original photo missing' });
-    }
+    const tempOriginal = path.join('/tmp', filename);
+    fs.writeFileSync(tempOriginal, Buffer.from(await fileData.arrayBuffer()));
 
-    const cleanedFilename = `${Date.now()}-cleaned.png`;
-    const cleanedPath = path.join(__dirname, 'photos', cleanedFilename);
-    const cleanedUrl = `/photos/${cleanedFilename}`;
+    // 2. Clean again
+    const cleanedFilename = `${Date.now()}-recleaned.png`;
+    const cleanedTempPath = path.join('/tmp', cleanedFilename);
+    await removeBackground(tempOriginal, cleanedTempPath);
 
-    // Run background removal
-    await removeBackground(originalPath, cleanedPath);
+    // 3. Upload new cleaned photo
+    const cleanedBuffer = fs.readFileSync(cleanedTempPath);
+    const { error: upErr } = await supabase.storage.from('idcards')
+      .upload(cleanedFilename, cleanedBuffer, { contentType: 'image/png', upsert: true });
+    if (upErr) throw upErr;
 
-    // Optionally remove the original (if you don't want to keep it)
-    fs.unlink(originalPath, (err) => {
-      if (err) console.warn('⚠️ Could not unlink original during re-clean:', originalPath, err.message);
-    });
+    const cleanedUrl = supabase.storage.from('idcards').getPublicUrl(cleanedFilename).data.publicUrl;
 
-    // Update DB to point to the cleaned version
+    // 4. Update DB
     const updated = await prisma.idCard.update({
       where: { id },
       data: { photoUrl: cleanedUrl }
     });
 
-    res.json({ message: 'Photo cleaned and updated', card: updated });
+    // 5. Cleanup
+    [tempOriginal, cleanedTempPath].forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
+
+    res.json({ message: 'Photo re-cleaned and updated', card: updated });
   } catch (err) {
-    console.error('❌ PUT /api/idcards/:id/clean-photo failed:', err);
-    res.status(500).json({ error: 'Failed to clean photo', details: err.message || err });
+    console.error('❌ clean-photo failed:', err);
+    res.status(500).json({ error: 'Failed to clean photo', details: err.message });
   }
 });
 
-// ---------- DELETE /api/idcards/:id (delete card + photo file) ----------
+// ---------- DELETE /api/idcards/:id ----------
 app.delete('/api/idcards/:id', authenticate, async (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
@@ -563,7 +560,6 @@ app.delete('/api/idcards/:id', authenticate, async (req, res) => {
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
 
-    // If CLIENT role, ensure they own the card
     if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
       return res.status(403).json({ error: 'Forbidden' });
     }
@@ -572,10 +568,7 @@ app.delete('/api/idcards/:id', authenticate, async (req, res) => {
 
     if (card.photoUrl) {
       const filename = path.basename(card.photoUrl);
-      const photoPath = path.join(__dirname, 'photos', filename);
-      fs.unlink(photoPath, (err) => {
-        if (err) console.warn(`⚠️ Failed to delete photo file: ${photoPath}`, err.message);
-      });
+      await supabase.storage.from('idcards').remove([filename]);
     }
 
     res.json({ message: 'ID card and photo deleted' });
