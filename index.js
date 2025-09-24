@@ -448,10 +448,15 @@ app.post('/api/idcards', authenticate, async (req, res) => {
 
 const { createClient } = require('@supabase/supabase-js');
 
-const supabase = createClient(
-  process.env.VITE_SUPABASE_URL,
-  process.env.VITE_SUPABASE_ANON_KEY // Use SERVICE ROLE key in backend only
-);
+const supabaseUrl = process.env.VITE_APP_SUPABASE_URL
+const supabaseKey = process.env.VITE_APP_SUPABASE_ANON_KEY
+
+if (!supabaseUrl || !supabaseKey) {
+  throw new Error('Supabase config missing. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY')
+}
+
+export const supabase = createClient(supabaseUrl, supabaseKey)
+
 
 app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   const id = parseInt(req.params.id);
