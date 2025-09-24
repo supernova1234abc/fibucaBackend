@@ -449,8 +449,8 @@ app.post('/api/idcards', authenticate, async (req, res) => {
 const { createClient } = require('@supabase/supabase-js');
 
 const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY // Use SERVICE ROLE key in backend only
+  process.env.VITE_SUPABASE_URL,
+  process.env.VITE_SUPABASE_ANON_KEY // Use SERVICE ROLE key in backend only
 );
 
 app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
