@@ -248,7 +248,7 @@ app.put('/api/change-password', authenticate, async (req, res) => {
  * Receives form data + PDF and saves to database
  * Also auto-creates a placeholder IdCard record
  */
-app.post("/submit-form", upload.single("pdf"), async (req, res) => {
+app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
   try {
     // 1️⃣ Parse the form
     const form = JSON.parse(req.body.data);
