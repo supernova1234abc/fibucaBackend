@@ -15,6 +15,8 @@ const app = express()
 const prisma = new PrismaClient()
 const PORT = process.env.PORT
 const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
+const pdfUrl = `${process.env.BASE_URL || 'https://fibucabackend.onrender.com'}/${pdfPath}`;
+
 //cors
 const allowedOrigins = [
   process.env.FRONTEND_URL || "http://localhost:5173",
@@ -258,7 +260,6 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
   try {
     // 1️⃣ Parse the form and save PDF path
     const form = JSON.parse(req.body.data);
-    //const pdfPath = req.file.path;
     const pdfPath = req.file.path.replace(/\\/g, '/'); // normalize slashes
 
     // 2️⃣ Create the Submission record
@@ -282,7 +283,6 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
       user = null;
     }
     if (!user) {
-      // If not, create new user
       const suffix = Math.floor(1000 + Math.random() * 9000).toString();
       tempPassword = form.employeeNumber + suffix;
       hashedPassword = await bcrypt.hash(tempPassword, 10);
@@ -299,13 +299,11 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
         });
       } catch (err) {
         if (err.code === 'P2002') {
-          // Unique constraint failed
           return res.status(409).json({ error: 'A user with this employee number already exists.' });
         }
         throw err;
       }
     } else {
-      // If user exists, set tempPassword to null so frontend knows not to auto-login
       tempPassword = null;
     }
 
@@ -325,39 +323,39 @@ app.post('/submit-form', upload.single('pdf'), async (req, res) => {
         data: {
           userId: user.id,
           fullName: user.name,
-          photoUrl: '',                // empty until they upload or capture later
+          photoUrl: '',
           company: submission.employerName,
-          role: 'Member',          // default for CLIENT
+          role: 'Member',
           issuedAt: new Date(),
           cardNumber: makeCardNumber()
         }
       });
     }
 
-    // 5️⃣ Respond with everything the front-end needs
+    // 5️⃣ Build full URL (so frontend doesn't need to guess)
+    const pdfUrl = `${process.env.BASE_URL || 'https://fibucabackend.onrender.com'}/${pdfPath}`;
 
-// Build full URL (so frontend doesn't need to guess)
-const pdfUrl = `${process.env.BASE_URL || 'https://fibucabackend.onrender.com'}/${pdfPath}`;
-
-res.status(200).json({
-  message: 'Form submitted...',
-  submission,
-  user: {
-    id: user.id,
-    name: user.name,
-    employeeNumber: user.employeeNumber,
-    role: user.role,
-    firstLogin: user.firstLogin,
-    pdfUrl,   // ✅ full URL
-  },
-  loginCredentials: tempPassword ? { username: user.username, password: tempPassword } : null,
-  idCard: placeholderCard
-});
+    // 6️⃣ Respond
+    res.status(200).json({
+      message: 'Form submitted, user registered & placeholder ID card created',
+      submission,
+      user: {
+        id: user.id,
+        name: user.name,
+        employeeNumber: user.employeeNumber,
+        role: user.role,
+        firstLogin: user.firstLogin,
+        pdfUrl, // ✅ now actually defined
+      },
+      loginCredentials: tempPassword ? { username: user.username, password: tempPassword } : null,
+      idCard: placeholderCard
+    });
   } catch (err) {
     console.error('❌ Submission error:', err);
     res.status(500).json({ error: 'Failed to submit form' });
   }
 });
+
 
 /**
  * ✅ POST /bulk-upload
@@ -469,12 +467,12 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
     // If user is CLIENT, ensure it belongs to them
     if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
       // cleanup uploaded file to avoid orphan
-      try { fs.unlinkSync(req.file.path); } catch (e) {}
+      try { fs.unlinkSync(req.file.path); } catch (e) { }
       return res.status(403).json({ error: 'Forbidden' });
     }
   } catch (err) {
     console.error('❌ Checking card ownership failed:', err);
-    try { fs.unlinkSync(req.file.path); } catch (e) {}
+    try { fs.unlinkSync(req.file.path); } catch (e) { }
     return res.status(500).json({ error: 'Server error' });
   }
 
@@ -505,9 +503,9 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
   } catch (err) {
     console.error('❌ PUT /api/idcards/:id/photo failed:', err);
     // attempt cleanup of any produced cleaned file
-    try { if (fs.existsSync(cleanedPath)) fs.unlinkSync(cleanedPath); } catch (e) {}
+    try { if (fs.existsSync(cleanedPath)) fs.unlinkSync(cleanedPath); } catch (e) { }
     // also try to remove original
-    try { if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath); } catch (e) {}
+    try { if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath); } catch (e) { }
     res.status(500).json({ error: 'Failed to process photo', details: err.message || err });
   }
 });
