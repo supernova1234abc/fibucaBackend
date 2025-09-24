@@ -265,9 +265,10 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       .upload(fileName, pdfBlob, { contentType: "application/pdf", upsert: true });
     if (error) throw error;
 
-    // 4️⃣ Get public URL
-    const { data: urlData } = supabase.storage.from("uploads").getPublicUrl(fileName);
-    const pdfUrl = urlData.publicUrl;
+// 4️⃣ Get public URL safely
+const { data: urlData, error: urlError } = supabase.storage.from("uploads").getPublicUrl(fileName);
+if (urlError) throw urlError;
+const pdfUrl = urlData.publicUrl;
 
     // 5️⃣ Create the Submission record
     const submission = await prisma.submission.create({
