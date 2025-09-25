@@ -439,103 +439,93 @@ app.post('/api/idcards', authenticate, async (req, res) => {
   }
 });
 
-
-
 // ---------- PUT /api/idcards/:id/photo (upload + clean + store in Supabase) ----------
-
-
-// Upload & clean new photo
 app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
   if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
 
-  let card;
   try {
-    card = await prisma.idCard.findUnique({ where: { id } });
+    const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
     if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
-      fs.unlinkSync(req.file.path);
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    const originalPath = req.file.path;
+    // 1️⃣ Get uploaded image as buffer
+    const imageBuffer = req.file.buffer;
+
+    // 2️⃣ Clean photo via Python (returns buffer)
+    const cleanedBuffer = await removeBackgroundBuffer(imageBuffer);
+
+    // 3️⃣ Upload cleaned buffer to Supabase
     const cleanedFilename = `${Date.now()}-cleaned.png`;
-    const cleanedTempPath = path.join('/tmp', cleanedFilename);
-
-    // 1️⃣ Clean photo using Python script
-    await removeBackgroundBuffer(originalPath, cleanedTempPath);
-
-    // 2️⃣ Stream upload cleaned photo to Supabase
-    const cleanedStream = fs.createReadStream(cleanedTempPath);
     const { error: upErr } = await supabase.storage
       .from('idcards')
-      .upload(cleanedFilename, cleanedStream, {
+      .upload(cleanedFilename, cleanedBuffer, {
         contentType: 'image/png',
         upsert: true,
       });
     if (upErr) throw upErr;
 
-    // 3️⃣ Get public URL
+    // 4️⃣ Get public URL
     const photoUrl = supabase.storage.from('idcards').getPublicUrl(cleanedFilename).data.publicUrl;
 
-    // 4️⃣ Update DB
+    // 5️⃣ Update DB
     const updatedCard = await prisma.idCard.update({
       where: { id },
       data: { photoUrl },
     });
 
-    // 5️⃣ Cleanup temp files
-    [originalPath, cleanedTempPath].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
-
     res.json({ message: 'Photo uploaded, cleaned & stored!', card: updatedCard });
 
   } catch (err) {
     console.error('❌ PUT /api/idcards/:id/photo failed:', err);
-    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: 'Failed to process photo', details: err.message });
   }
 });
 
-
-// Re-clean existing photo
+// ---------- PUT /api/idcards/:id/clean-photo ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
 
   try {
     const card = await prisma.idCard.findUnique({ where: { id } });
-    if (!card || !card.photoUrl) return res.status(404).json({ error: 'ID card or photo not found' });
+    if (!card || !card.photoUrl) {
+      return res.status(404).json({ error: 'ID card or photo not found' });
+    }
 
-    // Download existing photo from Supabase
+    // 1️⃣ Download existing photo as buffer
     const filename = path.basename(card.photoUrl);
-    const { data: fileData, error: dlErr } = await supabase.storage.from('idcards').download(filename);
+    const { data: fileData, error: dlErr } = await supabase.storage
+      .from('idcards')
+      .download(filename);
     if (dlErr) throw dlErr;
 
-    const tempOriginal = path.join('/tmp', filename);
-    fs.writeFileSync(tempOriginal, Buffer.from(await fileData.arrayBuffer()));
+    const imageBuffer = Buffer.from(await fileData.arrayBuffer());
 
-    // Clean again
+    // 2️⃣ Clean again via Python
+    const cleanedBuffer = await removeBackgroundBuffer(imageBuffer);
+
+    // 3️⃣ Upload cleaned buffer to Supabase
     const cleanedFilename = `${Date.now()}-recleaned.png`;
-    const cleanedTempPath = path.join('/tmp', cleanedFilename);
-    await removeBackgroundBuffer(tempOriginal, cleanedTempPath);
-
-    // Stream upload new cleaned photo
-    const cleanedStream = fs.createReadStream(cleanedTempPath);
-    const { error: upErr } = await supabase.storage.from('idcards')
-      .upload(cleanedFilename, cleanedStream, { contentType: 'image/png', upsert: true });
+    const { error: upErr } = await supabase.storage
+      .from('idcards')
+      .upload(cleanedFilename, cleanedBuffer, {
+        contentType: 'image/png',
+        upsert: true,
+      });
     if (upErr) throw upErr;
 
+    // 4️⃣ Get public URL
     const cleanedUrl = supabase.storage.from('idcards').getPublicUrl(cleanedFilename).data.publicUrl;
 
-    // Update DB
+    // 5️⃣ Update DB
     const updated = await prisma.idCard.update({
       where: { id },
-      data: { photoUrl: cleanedUrl }
+      data: { photoUrl: cleanedUrl },
     });
-
-    // Cleanup
-    [tempOriginal, cleanedTempPath].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
 
     res.json({ message: 'Photo re-cleaned and updated', card: updated });
 
