@@ -241,9 +241,6 @@ app.put('/api/change-password', authenticate, async (req, res) => {
 
 
 
-
-
-
 /**
  * ✅ POST /submit-form
  * Receives form data + PDF and saves to database
