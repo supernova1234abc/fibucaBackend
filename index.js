@@ -464,7 +464,7 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
     const cleanedTempPath = path.join('/tmp', cleanedFilename);
 
     // 1️⃣ Clean photo using Python script
-    await removeBackground(originalPath, cleanedTempPath);
+    await removeBackgroundBuffer(originalPath, cleanedTempPath);
 
     // 2️⃣ Stream upload cleaned photo to Supabase
     const cleanedStream = fs.createReadStream(cleanedTempPath);
@@ -518,7 +518,7 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     // Clean again
     const cleanedFilename = `${Date.now()}-recleaned.png`;
     const cleanedTempPath = path.join('/tmp', cleanedFilename);
-    await removeBackground(tempOriginal, cleanedTempPath);
+    await removeBackgroundBuffer(tempOriginal, cleanedTempPath);
 
     // Stream upload new cleaned photo
     const cleanedStream = fs.createReadStream(cleanedTempPath);
