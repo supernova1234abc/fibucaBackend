@@ -240,6 +240,21 @@ app.put('/api/change-password', authenticate, async (req, res) => {
 
 
 
+// backend
+app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
+  try {
+    const submission = await prisma.submission.findUnique({
+      where: { employeeNumber: req.params.employeeNumber },
+    });
+    if (!submission) return res.status(404).json({ error: 'No submission found' });
+    res.json(submission);
+  } catch (err) {
+    console.error('❌ fetch submission failed:', err);
+    res.status(500).json({ error: 'Failed to fetch submission' });
+  }
+});
+
+
 
 /**
  * ✅ POST /submit-form
@@ -267,18 +282,28 @@ const { data: urlData, error: urlError } = supabase.storage.from("uploads").getP
 if (urlError) throw urlError;
 const pdfUrl = urlData.publicUrl;
 
-    // 5️⃣ Create the Submission record
-    const submission = await prisma.submission.create({
-      data: {
-        employeeName: form.employeeName,
-        employeeNumber: form.employeeNumber,
-        employerName: form.employerName,
-        dues: form.dues,
-        witness: form.witness,
-        pdfPath: pdfUrl,
-        submittedAt: new Date(),
-      },
-    });
+  // 5️⃣ Create OR Update the Submission record
+const submission = await prisma.submission.upsert({
+  where: { employeeNumber: form.employeeNumber },
+  update: {
+    employeeName: form.employeeName,
+    employerName: form.employerName,
+    dues: form.dues,
+    witness: form.witness,
+    pdfPath: pdfUrl,
+    submittedAt: new Date(),
+  },
+  create: {
+    employeeName: form.employeeName,
+    employeeNumber: form.employeeNumber,
+    employerName: form.employerName,
+    dues: form.dues,
+    witness: form.witness,
+    pdfPath: pdfUrl,
+    submittedAt: new Date(),
+  },
+});
+
 
     // 6️⃣ Check if user exists, else create
     let user, tempPassword;
@@ -389,9 +414,6 @@ app.post('/bulk-upload', async (req, res) => {
  * ✅ POST /api/idcards
  * Create a new ID card
  */
-
-
-
 const { removeBackground } = require('./py-tools/utils/runPython');
 // ---------- helper: safe filename + multer limits (optional: keep if not present) ----------
 const MAX_PHOTO_BYTES = 3 * 1024 * 1024; // 3MB
