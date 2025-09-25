@@ -388,7 +388,7 @@ app.post('/bulk-upload', async (req, res) => {
  * ✅ POST /api/idcards
  * Create a new ID card
  */
-const { removeBackground } = require('./py-tools/utils/runPython');
+const { removeBackgroundBuffer } = require('./py-tools/utils/runPython');
 
 
 // ---------- GET /api/idcards/:userId ----------
