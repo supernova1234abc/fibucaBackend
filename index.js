@@ -452,38 +452,52 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    // 1️⃣ Get uploaded image as buffer
-    const imageBuffer = req.file.buffer;
+    // === 1) Upload raw photo ===
+    const fileExt = req.file.originalname.split('.').pop();
+    const baseName = `id_${id}_${Date.now()}.${fileExt}`;
+    const rawPath = `photos/raw/${baseName}`;
 
-    // 2️⃣ Clean photo via Python (returns buffer)
-    const cleanedBuffer = await removeBackgroundBuffer(imageBuffer);
+    const { error: rawErr } = await supabase.storage
+      .from('photos')
+      .upload(rawPath, req.file.buffer, {
+        contentType: req.file.mimetype,
+        upsert: true,
+      });
+    if (rawErr) throw rawErr;
 
-    // 3️⃣ Upload cleaned buffer to Supabase
-    const cleanedFilename = `${Date.now()}-cleaned.png`;
-    const { error: upErr } = await supabase.storage
-      .from('idcards')
-      .upload(cleanedFilename, cleanedBuffer, {
+    const rawUrl = supabase.storage.from('photos').getPublicUrl(rawPath).data.publicUrl;
+
+    // === 2) Clean photo via Python ===
+    const cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
+
+    // === 3) Upload cleaned photo ===
+    const cleanPath = `photos/clean/${baseName.replace(`.${fileExt}`, '.png')}`;
+    const { error: cleanErr } = await supabase.storage
+      .from('photos')
+      .upload(cleanPath, cleanedBuffer, {
         contentType: 'image/png',
         upsert: true,
       });
-    if (upErr) throw upErr;
+    if (cleanErr) throw cleanErr;
 
-    // 4️⃣ Get public URL
-    const photoUrl = supabase.storage.from('idcards').getPublicUrl(cleanedFilename).data.publicUrl;
+    const cleanUrl = supabase.storage.from('photos').getPublicUrl(cleanPath).data.publicUrl;
 
-    // 5️⃣ Update DB
+    // === 4) Update DB with both URLs ===
     const updatedCard = await prisma.idCard.update({
       where: { id },
-      data: { photoUrl },
+      data: {
+        rawPhotoUrl: rawUrl,
+        cleanPhotoUrl: cleanUrl,
+      },
     });
 
     res.json({ message: 'Photo uploaded, cleaned & stored!', card: updatedCard });
-
   } catch (err) {
     console.error('❌ PUT /api/idcards/:id/photo failed:', err);
     res.status(500).json({ error: 'Failed to process photo', details: err.message });
   }
 });
+
 
 // ---------- PUT /api/idcards/:id/clean-photo ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
@@ -492,48 +506,47 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
 
   try {
     const card = await prisma.idCard.findUnique({ where: { id } });
-    if (!card || !card.photoUrl) {
-      return res.status(404).json({ error: 'ID card or photo not found' });
+    if (!card || !card.rawPhotoUrl) {
+      return res.status(404).json({ error: 'ID card or raw photo not found' });
     }
 
-    // 1️⃣ Download existing photo as buffer
-    const filename = path.basename(card.photoUrl);
+    // === 1) Download raw photo as buffer ===
+    const rawFilename = path.basename(card.rawPhotoUrl);
     const { data: fileData, error: dlErr } = await supabase.storage
-      .from('idcards')
-      .download(filename);
+      .from('photos')
+      .download(`photos/raw/${rawFilename}`);
     if (dlErr) throw dlErr;
 
-    const imageBuffer = Buffer.from(await fileData.arrayBuffer());
+    const rawBuffer = Buffer.from(await fileData.arrayBuffer());
 
-    // 2️⃣ Clean again via Python
-    const cleanedBuffer = await removeBackgroundBuffer(imageBuffer);
+    // === 2) Clean again ===
+    const cleanedBuffer = await removeBackgroundBuffer(rawBuffer);
 
-    // 3️⃣ Upload cleaned buffer to Supabase
-    const cleanedFilename = `${Date.now()}-recleaned.png`;
+    // === 3) Upload new cleaned photo ===
+    const cleanPath = `photos/clean/id_${id}_${Date.now()}_recleaned.png`;
     const { error: upErr } = await supabase.storage
-      .from('idcards')
-      .upload(cleanedFilename, cleanedBuffer, {
+      .from('photos')
+      .upload(cleanPath, cleanedBuffer, {
         contentType: 'image/png',
         upsert: true,
       });
     if (upErr) throw upErr;
 
-    // 4️⃣ Get public URL
-    const cleanedUrl = supabase.storage.from('idcards').getPublicUrl(cleanedFilename).data.publicUrl;
+    const cleanUrl = supabase.storage.from('photos').getPublicUrl(cleanPath).data.publicUrl;
 
-    // 5️⃣ Update DB
+    // === 4) Update DB ===
     const updated = await prisma.idCard.update({
       where: { id },
-      data: { photoUrl: cleanedUrl },
+      data: { cleanPhotoUrl: cleanUrl },
     });
 
     res.json({ message: 'Photo re-cleaned and updated', card: updated });
-
   } catch (err) {
     console.error('❌ clean-photo failed:', err);
     res.status(500).json({ error: 'Failed to clean photo', details: err.message });
   }
 });
+
 
 
 // ---------- DELETE /api/idcards/:id ----------
