@@ -12,25 +12,36 @@ require('dotenv').config()
 const supabase = require('./supabaseClient');
 
 const app = express()
-const prisma = new PrismaClient()
-const PORT = process.env.PORT
-const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 
-//cors
+// ---------- CORS Setup ----------
 const allowedOrigins = [
   process.env.VITE_FRONTEND_URL || "http://localhost:5173",
   "https://fibuca-frontend.vercel.app"
 ];
 
-app.use(cors({
-  origin: (origin, callback) => {
-    // allow requests with no origin (Postman, curl, etc.)
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-    callback(new Error('CORS: Origin not allowed'));
-  },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  credentials: true
-}));
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  
+  if (!origin || allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+
+  // Handle preflight
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
+const prisma = new PrismaClient()
+const PORT = process.env.PORT
+const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
+
+
 
 // Parse JSON / URL-encoded requests
 app.use(express.json())
