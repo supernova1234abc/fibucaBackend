@@ -49,13 +49,15 @@ enum Role {
 }
 
 model IdCard {
-  id         Int      @id @default(autoincrement())
-  user       User     @relation(fields: [userId], references: [id])
-  userId     Int
-  fullName   String
-  photoUrl   String? // URL or path to uploaded photo
-  company    String
-  role       String
-  issuedAt   DateTime @default(now())
-  cardNumber String   @unique
+  id            Int      @id @default(autoincrement())
+  user          User     @relation(fields: [userId], references: [id])
+  userId        Int
+  fullName      String
+  rawPhotoUrl   String?  // original upload (untouched)
+  cleanPhotoUrl String?  // cleaned by rembg
+  company       String
+  role          String
+  issuedAt      DateTime @default(now())
+  cardNumber    String   @unique
 }
+
