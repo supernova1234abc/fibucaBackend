@@ -11,7 +11,7 @@ RUN npm install
 
 # Install Python dependencies first (cache busts only if requirements.txt changes)
 COPY requirements.txt ./
-RUN python3 -m venv venvi contact render support as my backend host, sayed when seeing out of memory events i got 2 opt 1.adjust ur code to use less memory ,,2.upgrade instance.....now we hve dne so far code adjusxtment in photo uplod and cleaning even creating buckets in superbse but didnt solve and i wnt free plan as testing what else we can do master
+RUN python3 -m venv venv
 RUN venv/bin/pip install --upgrade pip
 RUN venv/bin/pip install -r requirements.txt
 
