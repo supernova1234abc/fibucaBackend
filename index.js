@@ -452,7 +452,6 @@ app.post('/api/idcards', authenticate, async (req, res) => {
 
 // ---------- PUT /api/idcards/:id/photo (upload + clean + store in Supabase) ----------
 app.put('/api/idcards/:id/photo', authenticate, (req, res) => {
-    // Use disk storage for this route to avoid keeping files in memory
     const tmpDir = path.join(__dirname, 'tmp', 'uploads');
     fs.mkdirSync(tmpDir, { recursive: true });
 
@@ -467,55 +466,55 @@ app.put('/api/idcards/:id/photo', authenticate, (req, res) => {
 
         const id = parseInt(req.params.id);
         if (isNaN(id)) {
-            // cleanup
-            try { fs.unlinkSync(req.file.path); } catch (_) {}
+            try { await fs.promises.unlink(req.file.path); } catch (_) {}
             return res.status(400).json({ error: 'Invalid ID' });
         }
 
         try {
             const card = await prisma.idCard.findUnique({ where: { id } });
             if (!card) {
-                try { fs.unlinkSync(req.file.path); } catch (_) {}
+                try { await fs.promises.unlink(req.file.path); } catch (_) {}
                 return res.status(404).json({ error: 'ID card not found' });
             }
             if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
-                try { fs.unlinkSync(req.file.path); } catch (_) {}
+                try { await fs.promises.unlink(req.file.path); } catch (_) {}
                 return res.status(403).json({ error: 'Forbidden' });
             }
 
-            // prepare names
             const origExt = path.extname(req.file.originalname) || '.jpg';
             const baseName = `id_${id}_${Date.now()}`;
             const rawPath = `photos/raw/${baseName}${origExt}`;
             const cleanPath = `photos/clean/${baseName}.png`;
 
-            // 1) Upload raw from disk as stream (avoid Buffer)
-            const rawStream = fs.createReadStream(req.file.path);
+            // Read raw file into a Buffer (avoids streaming + duplex issue)
+            const rawBuffer = await fs.promises.readFile(req.file.path);
+
+            // Upload raw buffer to Supabase storage
             const { error: rawErr } = await supabase.storage
                 .from('photos')
-                .upload(rawPath, rawStream, {
+                .upload(rawPath, rawBuffer, {
                     contentType: req.file.mimetype,
                     upsert: true,
                 });
             if (rawErr) throw rawErr;
             const rawUrl = supabase.storage.from('photos').getPublicUrl(rawPath).data.publicUrl;
 
-            // 2) Clean photo via Python using files (avoid large Buffer in Node)
+            // Run Python cleaner writing cleaned file to disk
             const cleanedLocalPath = path.join(tmpDir, `${baseName}_cleaned.png`);
             await removeBackgroundFile(req.file.path, cleanedLocalPath);
 
-            // 3) Upload cleaned file as stream
-            const cleanedStream = fs.createReadStream(cleanedLocalPath);
+            // Read cleaned file into Buffer and upload
+            const cleanedBuffer = await fs.promises.readFile(cleanedLocalPath);
             const { error: cleanErr } = await supabase.storage
                 .from('photos')
-                .upload(cleanPath, cleanedStream, {
+                .upload(cleanPath, cleanedBuffer, {
                     contentType: 'image/png',
                     upsert: true,
                 });
             if (cleanErr) throw cleanErr;
             const cleanUrl = supabase.storage.from('photos').getPublicUrl(cleanPath).data.publicUrl;
 
-            // 4) Update DB
+            // Update DB
             const updatedCard = await prisma.idCard.update({
                 where: { id },
                 data: {
@@ -524,20 +523,18 @@ app.put('/api/idcards/:id/photo', authenticate, (req, res) => {
                 },
             });
 
-            // 5) Cleanup temp files
-            try { fs.unlinkSync(req.file.path); } catch (_) {}
-            try { fs.unlinkSync(cleanedLocalPath); } catch (_) {}
+            // Cleanup temp files
+            try { await fs.promises.unlink(req.file.path); } catch (_) {}
+            try { await fs.promises.unlink(cleanedLocalPath); } catch (_) {}
 
             res.json({ message: 'Photo uploaded, cleaned & stored!', card: updatedCard });
         } catch (err) {
             console.error('❌ PUT /api/idcards/:id/photo failed:', err);
-            // best-effort cleanup
-            try { if (req.file && req.file.path) fs.unlinkSync(req.file.path); } catch (_) {}
-            return res.status(500).json({ error: 'Failed to process photo', details: err.message });
+            try { if (req.file && req.file.path) await fs.promises.unlink(req.file.path); } catch (_) {}
+            return res.status(500).json({ error: 'Failed to process photo', details: err.message || String(err) });
         }
     });
 });
-
 // ---------- PUT /api/idcards/:id/clean-photo ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
   const id = parseInt(req.params.id);
