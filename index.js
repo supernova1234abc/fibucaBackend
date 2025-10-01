@@ -399,7 +399,7 @@ app.post('/bulk-upload', async (req, res) => {
  * ✅ POST /api/idcards
  * Create a new ID card
  */
-const { removeBackgroundBuffer } = require('./py-tools/utils/runPython');
+const { removeBackgroundBuffer, removeBackgroundFile } = require('./py-tools/utils/runPython');
 
 
 // ---------- GET /api/idcards/:userId ----------
@@ -451,64 +451,92 @@ app.post('/api/idcards', authenticate, async (req, res) => {
 });
 
 // ---------- PUT /api/idcards/:id/photo (upload + clean + store in Supabase) ----------
-app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
-  const id = parseInt(req.params.id);
-  if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
-  if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
+app.put('/api/idcards/:id/photo', authenticate, (req, res) => {
+    // Use disk storage for this route to avoid keeping files in memory
+    const tmpDir = path.join(__dirname, 'tmp', 'uploads');
+    fs.mkdirSync(tmpDir, { recursive: true });
 
-  try {
-    const card = await prisma.idCard.findUnique({ where: { id } });
-    if (!card) return res.status(404).json({ error: 'ID card not found' });
-    if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
+    const diskUpload = multer({ dest: tmpDir, limits: { fileSize: MAX_PHOTO_BYTES } }).single('photo');
 
-    // === 1) Upload raw photo ===
-    const fileExt = req.file.originalname.split('.').pop();
-    const baseName = `id_${id}_${Date.now()}.${fileExt}`;
-    const rawPath = `photos/raw/${baseName}`;
+    diskUpload(req, res, async (err) => {
+        if (err) {
+            console.error('❌ Multer error:', err);
+            return res.status(400).json({ error: 'Upload failed', details: err.message || String(err) });
+        }
+        if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
 
-    const { error: rawErr } = await supabase.storage
-      .from('photos')
-      .upload(rawPath, req.file.buffer, {
-        contentType: req.file.mimetype,
-        upsert: true,
-      });
-    if (rawErr) throw rawErr;
+        const id = parseInt(req.params.id);
+        if (isNaN(id)) {
+            // cleanup
+            try { fs.unlinkSync(req.file.path); } catch (_) {}
+            return res.status(400).json({ error: 'Invalid ID' });
+        }
 
-    const rawUrl = supabase.storage.from('photos').getPublicUrl(rawPath).data.publicUrl;
+        try {
+            const card = await prisma.idCard.findUnique({ where: { id } });
+            if (!card) {
+                try { fs.unlinkSync(req.file.path); } catch (_) {}
+                return res.status(404).json({ error: 'ID card not found' });
+            }
+            if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
+                try { fs.unlinkSync(req.file.path); } catch (_) {}
+                return res.status(403).json({ error: 'Forbidden' });
+            }
 
-    // === 2) Clean photo via Python ===
-    const cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
+            // prepare names
+            const origExt = path.extname(req.file.originalname) || '.jpg';
+            const baseName = `id_${id}_${Date.now()}`;
+            const rawPath = `photos/raw/${baseName}${origExt}`;
+            const cleanPath = `photos/clean/${baseName}.png`;
 
-    // === 3) Upload cleaned photo ===
-    const cleanPath = `photos/clean/${baseName.replace(`.${fileExt}`, '.png')}`;
-    const { error: cleanErr } = await supabase.storage
-      .from('photos')
-      .upload(cleanPath, cleanedBuffer, {
-        contentType: 'image/png',
-        upsert: true,
-      });
-    if (cleanErr) throw cleanErr;
+            // 1) Upload raw from disk as stream (avoid Buffer)
+            const rawStream = fs.createReadStream(req.file.path);
+            const { error: rawErr } = await supabase.storage
+                .from('photos')
+                .upload(rawPath, rawStream, {
+                    contentType: req.file.mimetype,
+                    upsert: true,
+                });
+            if (rawErr) throw rawErr;
+            const rawUrl = supabase.storage.from('photos').getPublicUrl(rawPath).data.publicUrl;
 
-    const cleanUrl = supabase.storage.from('photos').getPublicUrl(cleanPath).data.publicUrl;
+            // 2) Clean photo via Python using files (avoid large Buffer in Node)
+            const cleanedLocalPath = path.join(tmpDir, `${baseName}_cleaned.png`);
+            await removeBackgroundFile(req.file.path, cleanedLocalPath);
 
-    // === 4) Update DB with both URLs ===
-    const updatedCard = await prisma.idCard.update({
-      where: { id },
-      data: {
-        rawPhotoUrl: rawUrl,
-        cleanPhotoUrl: cleanUrl,
-      },
+            // 3) Upload cleaned file as stream
+            const cleanedStream = fs.createReadStream(cleanedLocalPath);
+            const { error: cleanErr } = await supabase.storage
+                .from('photos')
+                .upload(cleanPath, cleanedStream, {
+                    contentType: 'image/png',
+                    upsert: true,
+                });
+            if (cleanErr) throw cleanErr;
+            const cleanUrl = supabase.storage.from('photos').getPublicUrl(cleanPath).data.publicUrl;
+
+            // 4) Update DB
+            const updatedCard = await prisma.idCard.update({
+                where: { id },
+                data: {
+                    rawPhotoUrl: rawUrl,
+                    cleanPhotoUrl: cleanUrl,
+                },
+            });
+
+            // 5) Cleanup temp files
+            try { fs.unlinkSync(req.file.path); } catch (_) {}
+            try { fs.unlinkSync(cleanedLocalPath); } catch (_) {}
+
+            res.json({ message: 'Photo uploaded, cleaned & stored!', card: updatedCard });
+        } catch (err) {
+            console.error('❌ PUT /api/idcards/:id/photo failed:', err);
+            // best-effort cleanup
+            try { if (req.file && req.file.path) fs.unlinkSync(req.file.path); } catch (_) {}
+            return res.status(500).json({ error: 'Failed to process photo', details: err.message });
+        }
     });
-
-    res.json({ message: 'Photo uploaded, cleaned & stored!', card: updatedCard });
-  } catch (err) {
-    console.error('❌ PUT /api/idcards/:id/photo failed:', err);
-    res.status(500).json({ error: 'Failed to process photo', details: err.message });
-  }
 });
-
 
 // ---------- PUT /api/idcards/:id/clean-photo ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
