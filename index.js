@@ -10,7 +10,7 @@ const bcrypt = require('bcrypt')
 const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
 const supabase = require('./supabaseClient');
-import streamifier from "streamifier"; // 👈 helper for in-memory buffers
+const streamifier = require('streamifier') // ✅ const import style
 
 const app = express()
 
