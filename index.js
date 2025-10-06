@@ -247,18 +247,28 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
     const form = JSON.parse(req.body.data);
     if (!req.file) return res.status(400).json({ error: "No PDF uploaded" });
 
-    // 2️⃣ Upload PDF to Cloudinary
-    const uploadResult = await cloudinary.uploader.upload(req.file.path, {
-      folder: "fibuca_forms",
-      resource_type: "raw", // important for PDF files
-      public_id: `${form.employeeNumber}_form`,
-      overwrite: true,
-    });
+// 1️⃣ Convert buffer to Cloudinary stream
+    const uploadStream = () =>
+      new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: "fibuca_forms",
+            resource_type: "raw", // for PDFs
+            public_id: `${form.employeeNumber}_form`,
+            overwrite: true,
+          },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        );
+        streamifier.createReadStream(req.file.buffer).pipe(stream);
+      });
 
-    // 3️⃣ Remove temporary file
-    fs.unlinkSync(req.file.path);
-
+    // 2️⃣ Upload to Cloudinary
+    const uploadResult = await uploadStream();
     const pdfUrl = uploadResult.secure_url;
+
 
     // 4️⃣ Create OR update submission in database
     const submission = await prisma.submission.upsert({
