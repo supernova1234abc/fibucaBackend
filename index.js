@@ -456,10 +456,9 @@ app.post('/api/idcards', authenticate, async (req, res) => {
 });
 
 /**
- * ✅ Updated ID Card Photo Routes (Uploadcare-based)
- * No local image processing. Only stores Uploadcare URLs.
+ * ✅ PUT /api/idcards/:id/photo
+ * Save Uploadcare photo URLs to ID card
  */
-
 app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -479,7 +478,7 @@ app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
       where: { id },
       data: {
         rawPhotoUrl,
-        cleanPhotoUrl: cleanPhotoUrl || `${rawPhotoUrl}-/remove_bg/`,
+        cleanPhotoUrl: cleanPhotoUrl || `${rawPhotoUrl}-/remove_bg/`, // optional auto clean
       },
     });
 
@@ -493,7 +492,10 @@ app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
   }
 });
 
-// ---------- PUT /api/idcards/:id/clean-photo (manual re-clean trigger) ----------
+/**
+ * ✅ PUT /api/idcards/:id/clean-photo
+ * Re-generate the clean photo URL (Uploadcare remove_bg filter)
+ */
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -501,6 +503,9 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
 
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
+
+    if (!card.rawPhotoUrl)
+      return res.status(400).json({ error: 'No raw photo URL found to clean' });
 
     const cleanPhotoUrl = `${card.rawPhotoUrl}-/remove_bg/`;
 
