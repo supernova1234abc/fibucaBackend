@@ -400,7 +400,13 @@ app.post('/bulk-upload', async (req, res) => {
  * Create a new ID card
  */
 const { removeBackgroundBuffer, removeBackgroundFile } = require('./py-tools/utils/runPython');
-
+const { v2: cloudinary } = require('cloudinary');
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 // ---------- GET /api/idcards/:userId ----------
 app.get('/api/idcards/:userId', authenticate, async (req, res) => {
@@ -449,91 +455,59 @@ app.post('/api/idcards', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to create ID card' });
   }
 });
-
-// ---------- PUT /api/idcards/:id/photo (upload + clean + store in Supabase) ----------
+// ---------- PUT /api/idcards/:id/photo (upload + clean + store in Cloudinary) ----------
 app.put('/api/idcards/:id/photo', authenticate, (req, res) => {
-    const tmpDir = path.join(__dirname, 'tmp', 'uploads');
-    fs.mkdirSync(tmpDir, { recursive: true });
+  const upload = multer({ storage: multer.memoryStorage() }).single('photo');
 
-    const diskUpload = multer({ dest: tmpDir, limits: { fileSize: MAX_PHOTO_BYTES } }).single('photo');
+  upload(req, res, async (err) => {
+    if (err) {
+      console.error('❌ Multer error:', err);
+      return res.status(400).json({ error: 'Upload failed', details: err.message });
+    }
+    if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
 
-    diskUpload(req, res, async (err) => {
-        if (err) {
-            console.error('❌ Multer error:', err);
-            return res.status(400).json({ error: 'Upload failed', details: err.message || String(err) });
-        }
-        if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
 
-        const id = parseInt(req.params.id);
-        if (isNaN(id)) {
-            try { await fs.promises.unlink(req.file.path); } catch (_) {}
-            return res.status(400).json({ error: 'Invalid ID' });
-        }
+    try {
+      const card = await prisma.idCard.findUnique({ where: { id } });
+      if (!card) return res.status(404).json({ error: 'ID card not found' });
 
-        try {
-            const card = await prisma.idCard.findUnique({ where: { id } });
-            if (!card) {
-                try { await fs.promises.unlink(req.file.path); } catch (_) {}
-                return res.status(404).json({ error: 'ID card not found' });
+      if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
+        return res.status(403).json({ error: 'Forbidden' });
+
+      // 1️⃣ Clean the image buffer using Python
+      const cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
+
+      // 2️⃣ Upload both raw and clean images to Cloudinary
+      const uploadToCloudinary = (buffer, folder, publicId) =>
+        new Promise((resolve, reject) => {
+          const uploadStream = cloudinary.uploader.upload_stream(
+            { folder, public_id: publicId },
+            (error, result) => {
+              if (error) reject(error);
+              else resolve(result.secure_url);
             }
-            if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
-                try { await fs.promises.unlink(req.file.path); } catch (_) {}
-                return res.status(403).json({ error: 'Forbidden' });
-            }
+          );
+          streamifier.createReadStream(buffer).pipe(uploadStream);
+        });
 
-            const origExt = path.extname(req.file.originalname) || '.jpg';
-            const baseName = `id_${id}_${Date.now()}`;
-            const rawPath = `photos/raw/${baseName}${origExt}`;
-            const cleanPath = `photos/clean/${baseName}.png`;
+      const baseName = `id_${id}_${Date.now()}`;
+      const rawUrl = await uploadToCloudinary(req.file.buffer, 'fibuca/photos/raw', baseName);
+      const cleanUrl = await uploadToCloudinary(cleanedBuffer, 'fibuca/photos/clean', `${baseName}_clean`);
 
-            // Read raw file into a Buffer (avoids streaming + duplex issue)
-            const rawBuffer = await fs.promises.readFile(req.file.path);
+      // 3️⃣ Update database
+      const updatedCard = await prisma.idCard.update({
+        where: { id },
+        data: { rawPhotoUrl: rawUrl, cleanPhotoUrl: cleanUrl },
+      });
 
-            // Upload raw buffer to Supabase storage
-            const { error: rawErr } = await supabase.storage
-                .from('photos')
-                .upload(rawPath, rawBuffer, {
-                    contentType: req.file.mimetype,
-                    upsert: true,
-                });
-            if (rawErr) throw rawErr;
-            const rawUrl = supabase.storage.from('photos').getPublicUrl(rawPath).data.publicUrl;
-
-            // Run Python cleaner writing cleaned file to disk
-            const cleanedLocalPath = path.join(tmpDir, `${baseName}_cleaned.png`);
-            await removeBackgroundFile(req.file.path, cleanedLocalPath);
-
-            // Read cleaned file into Buffer and upload
-            const cleanedBuffer = await fs.promises.readFile(cleanedLocalPath);
-            const { error: cleanErr } = await supabase.storage
-                .from('photos')
-                .upload(cleanPath, cleanedBuffer, {
-                    contentType: 'image/png',
-                    upsert: true,
-                });
-            if (cleanErr) throw cleanErr;
-            const cleanUrl = supabase.storage.from('photos').getPublicUrl(cleanPath).data.publicUrl;
-
-            // Update DB
-            const updatedCard = await prisma.idCard.update({
-                where: { id },
-                data: {
-                    rawPhotoUrl: rawUrl,
-                    cleanPhotoUrl: cleanUrl,
-                },
-            });
-
-            // Cleanup temp files
-            try { await fs.promises.unlink(req.file.path); } catch (_) {}
-            try { await fs.promises.unlink(cleanedLocalPath); } catch (_) {}
-
-            res.json({ message: 'Photo uploaded, cleaned & stored!', card: updatedCard });
-        } catch (err) {
-            console.error('❌ PUT /api/idcards/:id/photo failed:', err);
-            try { if (req.file && req.file.path) await fs.promises.unlink(req.file.path); } catch (_) {}
-            return res.status(500).json({ error: 'Failed to process photo', details: err.message || String(err) });
-        }
-    });
+      res.json({ message: 'Photo uploaded, cleaned, and stored on Cloudinary!', card: updatedCard });
+    } catch (error) {
+      console.error('❌ Cloudinary upload error:', error);
+      res.status(500).json({ error: 'Failed to process photo', details: error.message });
+    }
+  });
 });
 // ---------- PUT /api/idcards/:id/clean-photo ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
@@ -542,41 +516,37 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
 
   try {
     const card = await prisma.idCard.findUnique({ where: { id } });
-    if (!card || !card.rawPhotoUrl) {
+    if (!card || !card.rawPhotoUrl)
       return res.status(404).json({ error: 'ID card or raw photo not found' });
-    }
 
-    // === 1) Download raw photo as buffer ===
-    const rawFilename = path.basename(card.rawPhotoUrl);
-    const { data: fileData, error: dlErr } = await supabase.storage
-      .from('photos')
-      .download(`photos/raw/${rawFilename}`);
-    if (dlErr) throw dlErr;
+    // 1️⃣ Download raw photo as buffer
+    const response = await fetch(card.rawPhotoUrl);
+    const arrayBuffer = await response.arrayBuffer();
+    const rawBuffer = Buffer.from(arrayBuffer);
 
-    const rawBuffer = Buffer.from(await fileData.arrayBuffer());
-
-    // === 2) Clean again ===
+    // 2️⃣ Re-clean it
     const cleanedBuffer = await removeBackgroundBuffer(rawBuffer);
 
-    // === 3) Upload new cleaned photo ===
-    const cleanPath = `photos/clean/id_${id}_${Date.now()}_recleaned.png`;
-    const { error: upErr } = await supabase.storage
-      .from('photos')
-      .upload(cleanPath, cleanedBuffer, {
-        contentType: 'image/png',
-        upsert: true,
-      });
-    if (upErr) throw upErr;
+    // 3️⃣ Upload re-cleaned photo
+    const baseName = `id_${id}_${Date.now()}_recleaned`;
+    const cleanUrl = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { folder: 'fibuca/photos/clean', public_id: baseName },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result.secure_url);
+        }
+      );
+      streamifier.createReadStream(cleanedBuffer).pipe(uploadStream);
+    });
 
-    const cleanUrl = supabase.storage.from('photos').getPublicUrl(cleanPath).data.publicUrl;
-
-    // === 4) Update DB ===
+    // 4️⃣ Update DB
     const updated = await prisma.idCard.update({
       where: { id },
       data: { cleanPhotoUrl: cleanUrl },
     });
 
-    res.json({ message: 'Photo re-cleaned and updated', card: updated });
+    res.json({ message: 'Photo re-cleaned & updated on Cloudinary', card: updated });
   } catch (err) {
     console.error('❌ clean-photo failed:', err);
     res.status(500).json({ error: 'Failed to clean photo', details: err.message });
