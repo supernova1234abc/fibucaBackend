@@ -226,8 +226,7 @@ app.put('/api/change-password', authenticate, async (req, res) => {
 })
 
 
-
-// backend
+// ---------- GET /api/submissions/:employeeNumber ----------
 app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
   try {
     const submission = await prisma.submission.findUnique({
@@ -241,38 +240,34 @@ app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
   }
 });
 
-
-// ----------------------------------------------------------
+// ---------- POST /submit-form ----------
 app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
   try {
     // 1️⃣ Parse form JSON from frontend
     const form = JSON.parse(req.body.data);
     if (!req.file) return res.status(400).json({ error: "No PDF uploaded" });
 
-// 1️⃣ Convert buffer to Cloudinary stream
+    // 2️⃣ Prepare Cloudinary upload stream
+    const publicId = `form_${form.employeeNumber}_${Date.now()}`;
     const uploadStream = () =>
       new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
-      {
-        resource_type: 'raw',      // important for PDFs, docs
-        public_id: publicId,       // name of the file without extension
-        format: 'pdf',             // ensures extension .pdf
-        folder: 'fibuca/forms',    // optional folder
-      },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
+          {
+            resource_type: 'raw',    // PDF or doc file
+            folder: 'fibuca/forms',  // Cloudinary folder
+            public_id: publicId,
+            format: 'pdf',            // ensures .pdf extension
+          },
+          (error, result) => (error ? reject(error) : resolve(result))
         );
         streamifier.createReadStream(req.file.buffer).pipe(stream);
       });
 
-    // 2️⃣ Upload to Cloudinary
+    // 3️⃣ Upload PDF
     const uploadResult = await uploadStream();
     const pdfUrl = uploadResult.secure_url;
 
-
-    // 4️⃣ Create OR update submission in database
+    // 4️⃣ Upsert submission record in database
     const submission = await prisma.submission.upsert({
       where: { employeeNumber: form.employeeNumber },
       update: {
@@ -294,11 +289,8 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       },
     });
 
-    // 5️⃣ Check if user exists, else create new one
-    let user = await prisma.user.findUnique({
-      where: { username: form.employeeNumber },
-    });
-
+    // 5️⃣ Check if user exists, else create
+    let user = await prisma.user.findUnique({ where: { username: form.employeeNumber } });
     let tempPassword = null;
 
     if (!user) {
@@ -328,10 +320,7 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       return `FIBUCA${prefix}${digits}`;
     };
 
-    let placeholderCard = await prisma.idCard.findFirst({
-      where: { userId: user.id },
-    });
-
+    let placeholderCard = await prisma.idCard.findFirst({ where: { userId: user.id } });
     if (!placeholderCard) {
       placeholderCard = await prisma.idCard.create({
         data: {
@@ -359,19 +348,14 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
         firstLogin: user.firstLogin,
         pdfUrl,
       },
-      loginCredentials: tempPassword
-        ? { username: user.username, password: tempPassword }
-        : null,
+      loginCredentials: tempPassword ? { username: user.username, password: tempPassword } : null,
       idCard: placeholderCard,
     });
   } catch (err) {
     console.error("❌ Submission error:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to submit form", details: err.message });
+    res.status(500).json({ error: "Failed to submit form", details: err.message });
   }
 });
-
 
 /**
  * ✅ POST /bulk-upload
