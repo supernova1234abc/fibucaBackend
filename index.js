@@ -11,6 +11,7 @@ const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
 const supabase = require('./supabaseClient');
 const streamifier = require('streamifier') // ✅ const import style
+const sharp = require('sharp');
 
 const app = express()
 
@@ -252,12 +253,12 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
     const uploadStream = () =>
       new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
-          {
-            folder: "fibuca_forms",
-            resource_type: "raw", // for PDFs
-            public_id: `${form.employeeNumber}_form`,
-            overwrite: true,
-          },
+      {
+        resource_type: 'raw',      // important for PDFs, docs
+        public_id: publicId,       // name of the file without extension
+        format: 'pdf',             // ensures extension .pdf
+        folder: 'fibuca/forms',    // optional folder
+      },
           (error, result) => {
             if (error) reject(error);
             else resolve(result);
@@ -470,16 +471,15 @@ app.post('/api/idcards', authenticate, async (req, res) => {
   }
 });
 
-
-// ---------- PUT /api/idcards/:id/photo (upload + clean + store in Cloudinary) ----------
+/ ---------- PUT /api/idcards/:id/photo ----------
 app.put('/api/idcards/:id/photo', authenticate, (req, res) => {
-  const upload = multer({ storage: multer.memoryStorage() }).single('photo');
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 2 * 1024 * 1024 }, // max 2MB
+  }).single('photo');
 
   upload(req, res, async (err) => {
-    if (err) {
-      console.error('❌ Multer error:', err);
-      return res.status(400).json({ error: 'Upload failed', details: err.message });
-    }
+    if (err) return res.status(400).json({ error: 'Upload failed', details: err.message });
     if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
 
     const id = parseInt(req.params.id);
@@ -488,47 +488,54 @@ app.put('/api/idcards/:id/photo', authenticate, (req, res) => {
     try {
       const card = await prisma.idCard.findUnique({ where: { id } });
       if (!card) return res.status(404).json({ error: 'ID card not found' });
-
       if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
         return res.status(403).json({ error: 'Forbidden' });
 
-      // 1️⃣ Clean the image buffer using Python
-      const cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
+      // --------------------------
+      // 1️⃣ Resize to passport size
+      // --------------------------
+      const resizedBuffer = await sharp(req.file.buffer)
+        .resize({ width: 400, height: 400, fit: 'cover', position: 'center' })
+        .toFormat('png')
+        .toBuffer();
 
-      // 2️⃣ Upload both raw and clean images to Cloudinary
-const uploadToCloudinary = (buffer, publicId) =>
-  new Promise((resolve, reject) => {
-    const uploadStream = cloudinary.uploader.upload_stream(
-      {
-        resource_type: 'raw',      // important for PDFs, docs
-        public_id: publicId,       // name of the file without extension
-        format: 'pdf',             // ensures extension .pdf
-        folder: 'fibuca/forms',    // optional folder
-      },
-      (error, result) => {
-        if (error) reject(error);
-        else resolve(result.secure_url);
-      }
-    );
-    streamifier.createReadStream(buffer).pipe(uploadStream);
-  });
+      // --------------------------
+      // 2️⃣ Remove background
+      // --------------------------
+      const cleanedBuffer = await removeBackgroundBuffer(resizedBuffer);
+
+      // --------------------------
+      // 3️⃣ Upload to Cloudinary
+      // --------------------------
+      const uploadToCloudinary = (buffer, folder, publicId) =>
+        new Promise((resolve, reject) => {
+          const uploadStream = cloudinary.uploader.upload_stream(
+            { folder, public_id: publicId, resource_type: 'image' },
+            (error, result) => (error ? reject(error) : resolve(result.secure_url))
+          );
+          streamifier.createReadStream(buffer).pipe(uploadStream);
+        });
+
       const baseName = `id_${id}_${Date.now()}`;
-      const rawUrl = await uploadToCloudinary(req.file.buffer, 'fibuca/photos/raw', baseName);
+      const rawUrl = await uploadToCloudinary(resizedBuffer, 'fibuca/photos/raw', baseName);
       const cleanUrl = await uploadToCloudinary(cleanedBuffer, 'fibuca/photos/clean', `${baseName}_clean`);
 
-      // 3️⃣ Update database
+      // --------------------------
+      // 4️⃣ Update DB
+      // --------------------------
       const updatedCard = await prisma.idCard.update({
         where: { id },
         data: { rawPhotoUrl: rawUrl, cleanPhotoUrl: cleanUrl },
       });
 
-      res.json({ message: 'Photo uploaded, cleaned, and stored on Cloudinary!', card: updatedCard });
+      res.json({ message: 'Photo resized, cleaned, and uploaded to Cloudinary!', card: updatedCard });
     } catch (error) {
-      console.error('❌ Cloudinary upload error:', error);
+      console.error('❌ Cloudinary/photo processing error:', error);
       res.status(500).json({ error: 'Failed to process photo', details: error.message });
     }
   });
 });
+
 // ---------- PUT /api/idcards/:id/clean-photo ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
   const id = parseInt(req.params.id);
@@ -539,41 +546,36 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     if (!card || !card.rawPhotoUrl)
       return res.status(404).json({ error: 'ID card or raw photo not found' });
 
-    // 1️⃣ Download raw photo as buffer
+    // 1️⃣ Fetch raw photo buffer from URL
     const response = await fetch(card.rawPhotoUrl);
     const arrayBuffer = await response.arrayBuffer();
     const rawBuffer = Buffer.from(arrayBuffer);
 
-    // 2️⃣ Re-clean it
+    // 2️⃣ Re-clean using Python
     const cleanedBuffer = await removeBackgroundBuffer(rawBuffer);
 
     // 3️⃣ Upload re-cleaned photo
     const baseName = `id_${id}_${Date.now()}_recleaned`;
     const cleanUrl = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
-        { folder: 'fibuca/photos/clean', public_id: baseName },
-        (error, result) => {
-          if (error) reject(error);
-          else resolve(result.secure_url);
-        }
+        { folder: 'fibuca/photos/clean', public_id: baseName, resource_type: 'image' },
+        (error, result) => (error ? reject(error) : resolve(result.secure_url))
       );
       streamifier.createReadStream(cleanedBuffer).pipe(uploadStream);
     });
 
     // 4️⃣ Update DB
-    const updated = await prisma.idCard.update({
+    const updatedCard = await prisma.idCard.update({
       where: { id },
       data: { cleanPhotoUrl: cleanUrl },
     });
 
-    res.json({ message: 'Photo re-cleaned & updated on Cloudinary', card: updated });
+    res.json({ message: 'Photo re-cleaned & updated on Cloudinary', card: updatedCard });
   } catch (err) {
     console.error('❌ clean-photo failed:', err);
     res.status(500).json({ error: 'Failed to clean photo', details: err.message });
   }
 });
-
-
 
 // ---------- DELETE /api/idcards/:id ----------
 app.delete('/api/idcards/:id', authenticate, async (req, res) => {
