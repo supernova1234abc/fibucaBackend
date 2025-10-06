@@ -11,8 +11,14 @@ const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
 const supabase = require('./supabaseClient');
 const streamifier = require('streamifier') // ✅ const import style
-const sharp = require('sharp');
-const axios = require('axios'); // <-- added to fetch raw image buffers
+const { v2: cloudinary } = require('cloudinary');
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
 
 const app = express()
 
@@ -397,7 +403,8 @@ app.post('/bulk-upload', async (req, res) => {
  * ✅ POST /api/idcards
  * Create a new ID card
  */
-const { removeBackgroundBuffer, removeBackgroundFile } = require('./py-tools/utils/runPython');
+// removeBackgroundBuffer is no longer needed
+// const { removeBackgroundBuffer, removeBackgroundFile } = require('./py-tools/utils/runPython');
 const { v2: cloudinary } = require('cloudinary');
 // Configure Cloudinary
 cloudinary.config({
@@ -445,7 +452,8 @@ app.post('/api/idcards', authenticate, async (req, res) => {
         company,
         role,
         cardNumber,
-        photoUrl: ''
+        photoUrl: '',
+        // photoStatus is no longer needed with synchronous Uploadcare processing
       }
     });
 
@@ -458,14 +466,15 @@ app.post('/api/idcards', authenticate, async (req, res) => {
 
 /**
  * ✅ PUT /api/idcards/:id/photo
- * Save Uploadcare photo URLs to ID card and attempt server-side cleaning + Cloudinary upload
+ * Save Uploadcare photo URLs to ID card. The clean URL is derived using Uploadcare's transformation.
  */
 app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
 
-    const { rawPhotoUrl, cleanPhotoUrl: clientCleanUrl } = req.body;
+    // The frontend only needs to send the raw URL from Uploadcare.
+    const { rawPhotoUrl } = req.body;
     if (!rawPhotoUrl)
       return res.status(400).json({ error: 'Missing rawPhotoUrl from frontend' });
 
@@ -475,62 +484,19 @@ app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
     if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
       return res.status(403).json({ error: 'Forbidden' });
 
-    console.log(`PUT /api/idcards/${id}/photo - rawPhotoUrl: ${rawPhotoUrl}`);
+    // Construct the clean URL using Uploadcare's built-in transformation.
+    const cleanPhotoUrl = `${rawPhotoUrl}-/remove_bg/`;
 
-    // First, save rawPhotoUrl immediately so frontend / DB is consistent
-    let updatedCard = await prisma.idCard.update({
+    const updatedCard = await prisma.idCard.update({
       where: { id },
       data: {
         rawPhotoUrl,
-        // tentatively set cleanPhotoUrl to client-provided or Uploadcare transform;
-        // we'll try to replace it with a server-side cleaned upload if possible
-        cleanPhotoUrl: clientCleanUrl || `${rawPhotoUrl}-/remove_bg/`,
+        cleanPhotoUrl,
       },
     });
 
-    // Try server-side cleaning using Python helper + upload to Cloudinary
-    try {
-      console.log('Attempting server-side background removal...');
-      // download raw image bytes
-      const resp = await axios.get(rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
-      const inputBuffer = Buffer.from(resp.data);
-
-      // call Python removeBackgroundBuffer (returns Buffer of PNG)
-      const cleanedBuffer = await removeBackgroundBuffer(inputBuffer);
-      if (!cleanedBuffer || !Buffer.isBuffer(cleanedBuffer)) {
-        throw new Error('Python cleaner returned invalid buffer');
-      }
-
-      // upload cleaned image buffer to Cloudinary (PNG)
-      const publicId = `idcard_${id}_${Date.now()}`;
-      const uploadResult = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          { folder: 'fibuca/idcards', public_id: publicId, resource_type: 'image', format: 'png' },
-          (err, result) => (err ? reject(err) : resolve(result))
-        );
-        streamifier.createReadStream(cleanedBuffer).pipe(stream);
-      });
-
-      if (uploadResult && uploadResult.secure_url) {
-        const serverCleanUrl = uploadResult.secure_url;
-        console.log('Server-side cleaning succeeded, cloud URL:', serverCleanUrl);
-
-        // persist serverCleanUrl
-        updatedCard = await prisma.idCard.update({
-          where: { id },
-          data: { cleanPhotoUrl: serverCleanUrl },
-        });
-      } else {
-        console.warn('Cloudinary upload returned no secure_url, keeping previous cleanPhotoUrl');
-      }
-    } catch (innerErr) {
-      // If anything fails, we already set a safe fallback; log the error for debugging
-      console.warn('Server-side cleaning failed:', innerErr && innerErr.message ? innerErr.message : innerErr);
-      // leave updatedCard as-is (client-provided or Uploadcare transform)
-    }
-
     res.json({
-      message: '✅ Photo URLs saved (server attempted cleaning).',
+      message: '✅ Photo URLs saved successfully using Uploadcare.',
       card: updatedCard,
     });
   } catch (err) {
@@ -541,8 +507,7 @@ app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
 
 /**
  * ✅ PUT /api/idcards/:id/clean-photo
- * Re-generate the clean photo via server-side Python cleaner -> Cloudinary,
- * fallback to Uploadcare transform if server-side processing fails.
+ * Re-generate the clean photo URL using Uploadcare's remove_bg filter.
  */
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
   try {
@@ -555,47 +520,16 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     if (!card.rawPhotoUrl)
       return res.status(400).json({ error: 'No raw photo URL found to clean' });
 
-    console.log(`PUT /api/idcards/${id}/clean-photo - rawPhotoUrl: ${card.rawPhotoUrl}`);
-
-    // Attempt server-side cleaning & Cloudinary upload
-    let finalCleanUrl = null;
-    try {
-      const resp = await axios.get(card.rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
-      const inputBuffer = Buffer.from(resp.data);
-      const cleanedBuffer = await removeBackgroundBuffer(inputBuffer);
-
-      if (!cleanedBuffer || !Buffer.isBuffer(cleanedBuffer)) {
-        throw new Error('Python cleaner returned invalid buffer');
-      }
-
-      const publicId = `idcard_clean_${id}_${Date.now()}`;
-      const uploadResult = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          { folder: 'fibuca/idcards', public_id: publicId, resource_type: 'image', format: 'png' },
-          (err, result) => (err ? reject(err) : resolve(result))
-        );
-        streamifier.createReadStream(cleanedBuffer).pipe(stream);
-      });
-
-      if (uploadResult && uploadResult.secure_url) {
-        finalCleanUrl = uploadResult.secure_url;
-        console.log('Re-clean succeeded, cloud url:', finalCleanUrl);
-      } else {
-        throw new Error('Cloudinary upload failed or returned no secure_url');
-      }
-    } catch (err) {
-      console.warn('Server-side re-clean failed, falling back to Uploadcare transform:', err && err.message ? err.message : err);
-      // fallback to Uploadcare transform if rawPhotoUrl is an Uploadcare CDN URL
-      finalCleanUrl = card.rawPhotoUrl ? `${card.rawPhotoUrl}-/remove_bg/` : null;
-    }
+    // Re-construct the clean URL from the stored raw URL.
+    const cleanPhotoUrl = `${card.rawPhotoUrl}-/remove_bg/`;
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
-      data: { cleanPhotoUrl: finalCleanUrl },
+      data: { cleanPhotoUrl },
     });
 
     res.json({
-      message: '✅ Photo re-cleaned (attempted server-side; fallback used if required).',
+      message: '✅ Photo re-cleaned using Uploadcare.',
       card: updatedCard,
     });
   } catch (err) {
@@ -799,6 +733,72 @@ app.delete('/api/admin/users/:id', /* requireAuth, requireRole(['ADMIN','SUPERAD
 app.get('/submissions', authenticate, async (req, res) => {
   try {
     if (req.user.role === 'CLIENT') {
+      const subs = await prisma.submission.findMany({
+        where: { employeeNumber: req.user.employeeNumber },
+        orderBy: { submittedAt: 'desc' }
+      })
+      return res.json(subs)
+    }
+
+    // ADMIN / SUPERADMIN -> all
+    const subs = await prisma.submission.findMany({
+      orderBy: { submittedAt: 'desc' }
+    })
+    res.json(subs)
+  } catch (err) {
+    console.error('❌ GET /submissions error:', err)
+    res.status(500).json({ error: 'Failed to fetch submissions' })
+  }
+})
+
+// PUT /submissions/:id -> update submission (admin only)
+app.put('/submissions/:id', authenticate, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!['ADMIN', 'SUPERADMIN'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+
+  const { employeeName, employeeNumber, employerName, dues, witness } = req.body
+  try {
+    const updated = await prisma.submission.update({
+      where: { id },
+      data: {
+        employeeName: employeeName ?? undefined,
+        employeeNumber: employeeNumber ?? undefined,
+        employerName: employerName ?? undefined,
+        dues: dues ?? undefined,
+        witness: witness ?? undefined
+      }
+    })
+    res.json(updated)
+  } catch (err) {
+    console.error(`❌ PUT /submissions/${id} error:`, err)
+    res.status(500).json({ error: 'Failed to update submission' })
+  }
+})
+
+// DELETE /submissions/:id -> delete submission (admin only)
+app.delete('/submissions/:id', authenticate, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!['ADMIN', 'SUPERADMIN'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+
+  try {
+    await prisma.submission.delete({ where: { id } })
+    res.json({ message: 'Submission deleted', id })
+  } catch (err) {
+    console.error(`❌ DELETE /submissions/${id} error:`, err)
+    res.status(500).json({ error: 'Failed to delete submission' })
+  }
+})
+
+
+
+// Start the server
+app.listen(PORT, () => {
+  console.log(`✅ FIBUCA backend running at http://localhost:${PORT}`);
+});
       const subs = await prisma.submission.findMany({
         where: { employeeNumber: req.user.employeeNumber },
         orderBy: { submittedAt: 'desc' }
