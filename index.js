@@ -420,6 +420,8 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+
+
 // ---------- GET /api/idcards/:userId ----------
 app.get('/api/idcards/:userId', authenticate, async (req, res) => {
   try {
@@ -467,6 +469,8 @@ app.post('/api/idcards', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to create ID card' });
   }
 });
+
+
 // ---------- PUT /api/idcards/:id/photo (upload + clean + store in Cloudinary) ----------
 app.put('/api/idcards/:id/photo', authenticate, (req, res) => {
   const upload = multer({ storage: multer.memoryStorage() }).single('photo');
@@ -492,18 +496,22 @@ app.put('/api/idcards/:id/photo', authenticate, (req, res) => {
       const cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
 
       // 2️⃣ Upload both raw and clean images to Cloudinary
-      const uploadToCloudinary = (buffer, folder, publicId) =>
-        new Promise((resolve, reject) => {
-          const uploadStream = cloudinary.uploader.upload_stream(
-            { folder, public_id: publicId },
-            (error, result) => {
-              if (error) reject(error);
-              else resolve(result.secure_url);
-            }
-          );
-          streamifier.createReadStream(buffer).pipe(uploadStream);
-        });
-
+const uploadToCloudinary = (buffer, publicId) =>
+  new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        resource_type: 'raw',      // important for PDFs, docs
+        public_id: publicId,       // name of the file without extension
+        format: 'pdf',             // ensures extension .pdf
+        folder: 'fibuca/forms',    // optional folder
+      },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result.secure_url);
+      }
+    );
+    streamifier.createReadStream(buffer).pipe(uploadStream);
+  });
       const baseName = `id_${id}_${Date.now()}`;
       const rawUrl = await uploadToCloudinary(req.file.buffer, 'fibuca/photos/raw', baseName);
       const cleanUrl = await uploadToCloudinary(cleanedBuffer, 'fibuca/photos/clean', `${baseName}_clean`);
