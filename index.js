@@ -405,13 +405,7 @@ app.post('/bulk-upload', async (req, res) => {
  */
 // removeBackgroundBuffer is no longer needed
 // const { removeBackgroundBuffer, removeBackgroundFile } = require('./py-tools/utils/runPython');
-const { v2: cloudinary } = require('cloudinary');
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+
 
 
 
