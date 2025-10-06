@@ -471,7 +471,7 @@ app.post('/api/idcards', authenticate, async (req, res) => {
   }
 });
 
-/ ---------- PUT /api/idcards/:id/photo ----------
+// ---------- PUT /api/idcards/:id/photo ----------
 app.put('/api/idcards/:id/photo', authenticate, (req, res) => {
   const upload = multer({
     storage: multer.memoryStorage(),
