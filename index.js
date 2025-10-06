@@ -240,59 +240,55 @@ app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
 });
 
 
-
-/**
- * ✅ POST /submit-form
- * Receives form data + PDF and saves to database
- * Also auto-creates a placeholder IdCard record
- */
+// ----------------------------------------------------------
 app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
   try {
-    // 1️⃣ Parse the form
+    // 1️⃣ Parse form JSON from frontend
     const form = JSON.parse(req.body.data);
     if (!req.file) return res.status(400).json({ error: "No PDF uploaded" });
 
-    // 2️⃣ Get the PDF content from Multer
-    const pdfBlob = req.file.buffer; // <-- fix: define pdfBlob
+    // 2️⃣ Upload PDF to Cloudinary
+    const uploadResult = await cloudinary.uploader.upload(req.file.path, {
+      folder: "fibuca_forms",
+      resource_type: "raw", // important for PDF files
+      public_id: `${form.employeeNumber}_form`,
+      overwrite: true,
+    });
 
-    // 3️⃣ Upload PDF to Supabase "uploads" bucket
-    const fileName = `forms/${form.employeeNumber}_form.pdf`;
-    const { data, error } = await supabase.storage
-      .from("uploads")
-      .upload(fileName, pdfBlob, { contentType: "application/pdf", upsert: true });
-    if (error) throw error;
+    // 3️⃣ Remove temporary file
+    fs.unlinkSync(req.file.path);
 
-// 4️⃣ Get public URL safely
-const { data: urlData, error: urlError } = supabase.storage.from("uploads").getPublicUrl(fileName);
-if (urlError) throw urlError;
-const pdfUrl = urlData.publicUrl;
+    const pdfUrl = uploadResult.secure_url;
 
-  // 5️⃣ Create OR Update the Submission record
-const submission = await prisma.submission.upsert({
-  where: { employeeNumber: form.employeeNumber },
-  update: {
-    employeeName: form.employeeName,
-    employerName: form.employerName,
-    dues: form.dues,
-    witness: form.witness,
-    pdfPath: pdfUrl,
-    submittedAt: new Date(),
-  },
-  create: {
-    employeeName: form.employeeName,
-    employeeNumber: form.employeeNumber,
-    employerName: form.employerName,
-    dues: form.dues,
-    witness: form.witness,
-    pdfPath: pdfUrl,
-    submittedAt: new Date(),
-  },
-});
+    // 4️⃣ Create OR update submission in database
+    const submission = await prisma.submission.upsert({
+      where: { employeeNumber: form.employeeNumber },
+      update: {
+        employeeName: form.employeeName,
+        employerName: form.employerName,
+        dues: form.dues,
+        witness: form.witness,
+        pdfPath: pdfUrl,
+        submittedAt: new Date(),
+      },
+      create: {
+        employeeName: form.employeeName,
+        employeeNumber: form.employeeNumber,
+        employerName: form.employerName,
+        dues: form.dues,
+        witness: form.witness,
+        pdfPath: pdfUrl,
+        submittedAt: new Date(),
+      },
+    });
 
+    // 5️⃣ Check if user exists, else create new one
+    let user = await prisma.user.findUnique({
+      where: { username: form.employeeNumber },
+    });
 
-    // 6️⃣ Check if user exists, else create
-    let user, tempPassword;
-    user = await prisma.user.findUnique({ where: { username: form.employeeNumber } });
+    let tempPassword = null;
+
     if (!user) {
       const suffix = Math.floor(1000 + Math.random() * 9000);
       tempPassword = form.employeeNumber + suffix;
@@ -310,7 +306,7 @@ const submission = await prisma.submission.upsert({
       });
     }
 
-    // 7️⃣ Generate placeholder ID card if not exists
+    // 6️⃣ Generate placeholder ID card if not exists
     const makeCardNumber = () => {
       const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
       const prefix = Array.from({ length: 2 })
@@ -320,13 +316,17 @@ const submission = await prisma.submission.upsert({
       return `FIBUCA${prefix}${digits}`;
     };
 
-    let placeholderCard = await prisma.idCard.findFirst({ where: { userId: user.id } });
+    let placeholderCard = await prisma.idCard.findFirst({
+      where: { userId: user.id },
+    });
+
     if (!placeholderCard) {
       placeholderCard = await prisma.idCard.create({
         data: {
           userId: user.id,
           fullName: user.name,
-          photoUrl: "",
+          rawPhotoUrl: "", // can be filled later after photo upload
+          cleanPhotoUrl: "",
           company: submission.employerName,
           role: "Member",
           issuedAt: new Date(),
@@ -335,9 +335,9 @@ const submission = await prisma.submission.upsert({
       });
     }
 
-    // 8️⃣ Respond to frontend
+    // 7️⃣ Respond to frontend
     res.status(200).json({
-      message: "Form submitted, user registered & placeholder ID card created",
+      message: "✅ Form submitted successfully",
       submission,
       user: {
         id: user.id,
@@ -354,10 +354,11 @@ const submission = await prisma.submission.upsert({
     });
   } catch (err) {
     console.error("❌ Submission error:", err);
-    res.status(500).json({ error: "Failed to submit form", details: err.message });
+    res
+      .status(500)
+      .json({ error: "Failed to submit form", details: err.message });
   }
 });
-
 
 
 /**
