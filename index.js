@@ -12,6 +12,7 @@ require('dotenv').config()
 const supabase = require('./supabaseClient');
 const streamifier = require('streamifier') // ✅ const import style
 const sharp = require('sharp');
+const axios = require('axios'); // <-- added to fetch raw image buffers
 
 const app = express()
 
@@ -457,14 +458,14 @@ app.post('/api/idcards', authenticate, async (req, res) => {
 
 /**
  * ✅ PUT /api/idcards/:id/photo
- * Save Uploadcare photo URLs to ID card
+ * Save Uploadcare photo URLs to ID card and attempt server-side cleaning + Cloudinary upload
  */
 app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
 
-    const { rawPhotoUrl, cleanPhotoUrl } = req.body;
+    const { rawPhotoUrl, cleanPhotoUrl: clientCleanUrl } = req.body;
     if (!rawPhotoUrl)
       return res.status(400).json({ error: 'Missing rawPhotoUrl from frontend' });
 
@@ -474,16 +475,62 @@ app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
     if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
       return res.status(403).json({ error: 'Forbidden' });
 
-    const updatedCard = await prisma.idCard.update({
+    console.log(`PUT /api/idcards/${id}/photo - rawPhotoUrl: ${rawPhotoUrl}`);
+
+    // First, save rawPhotoUrl immediately so frontend / DB is consistent
+    let updatedCard = await prisma.idCard.update({
       where: { id },
       data: {
         rawPhotoUrl,
-        cleanPhotoUrl: cleanPhotoUrl || `${rawPhotoUrl}-/remove_bg/`, // optional auto clean
+        // tentatively set cleanPhotoUrl to client-provided or Uploadcare transform;
+        // we'll try to replace it with a server-side cleaned upload if possible
+        cleanPhotoUrl: clientCleanUrl || `${rawPhotoUrl}-/remove_bg/`,
       },
     });
 
+    // Try server-side cleaning using Python helper + upload to Cloudinary
+    try {
+      console.log('Attempting server-side background removal...');
+      // download raw image bytes
+      const resp = await axios.get(rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
+      const inputBuffer = Buffer.from(resp.data);
+
+      // call Python removeBackgroundBuffer (returns Buffer of PNG)
+      const cleanedBuffer = await removeBackgroundBuffer(inputBuffer);
+      if (!cleanedBuffer || !Buffer.isBuffer(cleanedBuffer)) {
+        throw new Error('Python cleaner returned invalid buffer');
+      }
+
+      // upload cleaned image buffer to Cloudinary (PNG)
+      const publicId = `idcard_${id}_${Date.now()}`;
+      const uploadResult = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { folder: 'fibuca/idcards', public_id: publicId, resource_type: 'image', format: 'png' },
+          (err, result) => (err ? reject(err) : resolve(result))
+        );
+        streamifier.createReadStream(cleanedBuffer).pipe(stream);
+      });
+
+      if (uploadResult && uploadResult.secure_url) {
+        const serverCleanUrl = uploadResult.secure_url;
+        console.log('Server-side cleaning succeeded, cloud URL:', serverCleanUrl);
+
+        // persist serverCleanUrl
+        updatedCard = await prisma.idCard.update({
+          where: { id },
+          data: { cleanPhotoUrl: serverCleanUrl },
+        });
+      } else {
+        console.warn('Cloudinary upload returned no secure_url, keeping previous cleanPhotoUrl');
+      }
+    } catch (innerErr) {
+      // If anything fails, we already set a safe fallback; log the error for debugging
+      console.warn('Server-side cleaning failed:', innerErr && innerErr.message ? innerErr.message : innerErr);
+      // leave updatedCard as-is (client-provided or Uploadcare transform)
+    }
+
     res.json({
-      message: '✅ Photo URLs saved successfully',
+      message: '✅ Photo URLs saved (server attempted cleaning).',
       card: updatedCard,
     });
   } catch (err) {
@@ -494,7 +541,8 @@ app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
 
 /**
  * ✅ PUT /api/idcards/:id/clean-photo
- * Re-generate the clean photo URL (Uploadcare remove_bg filter)
+ * Re-generate the clean photo via server-side Python cleaner -> Cloudinary,
+ * fallback to Uploadcare transform if server-side processing fails.
  */
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
   try {
@@ -507,15 +555,47 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     if (!card.rawPhotoUrl)
       return res.status(400).json({ error: 'No raw photo URL found to clean' });
 
-    const cleanPhotoUrl = `${card.rawPhotoUrl}-/remove_bg/`;
+    console.log(`PUT /api/idcards/${id}/clean-photo - rawPhotoUrl: ${card.rawPhotoUrl}`);
+
+    // Attempt server-side cleaning & Cloudinary upload
+    let finalCleanUrl = null;
+    try {
+      const resp = await axios.get(card.rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
+      const inputBuffer = Buffer.from(resp.data);
+      const cleanedBuffer = await removeBackgroundBuffer(inputBuffer);
+
+      if (!cleanedBuffer || !Buffer.isBuffer(cleanedBuffer)) {
+        throw new Error('Python cleaner returned invalid buffer');
+      }
+
+      const publicId = `idcard_clean_${id}_${Date.now()}`;
+      const uploadResult = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { folder: 'fibuca/idcards', public_id: publicId, resource_type: 'image', format: 'png' },
+          (err, result) => (err ? reject(err) : resolve(result))
+        );
+        streamifier.createReadStream(cleanedBuffer).pipe(stream);
+      });
+
+      if (uploadResult && uploadResult.secure_url) {
+        finalCleanUrl = uploadResult.secure_url;
+        console.log('Re-clean succeeded, cloud url:', finalCleanUrl);
+      } else {
+        throw new Error('Cloudinary upload failed or returned no secure_url');
+      }
+    } catch (err) {
+      console.warn('Server-side re-clean failed, falling back to Uploadcare transform:', err && err.message ? err.message : err);
+      // fallback to Uploadcare transform if rawPhotoUrl is an Uploadcare CDN URL
+      finalCleanUrl = card.rawPhotoUrl ? `${card.rawPhotoUrl}-/remove_bg/` : null;
+    }
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
-      data: { cleanPhotoUrl },
+      data: { cleanPhotoUrl: finalCleanUrl },
     });
 
     res.json({
-      message: '✅ Photo re-cleaned (Uploadcare)',
+      message: '✅ Photo re-cleaned (attempted server-side; fallback used if required).',
       card: updatedCard,
     });
   } catch (err) {
@@ -523,7 +603,6 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to clean photo', details: err.message });
   }
 });
-
 
 // ---------- DELETE /api/idcards/:id ----------
 app.delete('/api/idcards/:id', authenticate, async (req, res) => {
