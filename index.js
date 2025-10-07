@@ -65,8 +65,6 @@ app.use('/photos', express.static(path.join(__dirname, 'photos')))
 
 
 
-
-
 // ✅ Use memory storage for all uploads
 const MAX_PHOTO_BYTES = 3 * 1024 * 1024; // 3MB
 const uploadPDF = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES } });
@@ -788,7 +786,48 @@ app.delete('/submissions/:id', authenticate, async (req, res) => {
   }
 })
 
+// ensure photos directory exists
+const PHOTOS_DIR = path.join(__dirname, 'photos');
+if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 
+/**
+ * POST /api/idcards/:id/upload-clean
+ * Accept cleaned image (PNG) from browser, save to /photos and update idCard.cleanPhotoUrl
+ */
+app.post('/api/idcards/:id/upload-clean', authenticate, uploadPhoto.single('cleanImage'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
+
+    const card = await prisma.idCard.findUnique({ where: { id } });
+    if (!card) return res.status(404).json({ error: 'ID card not found' });
+
+    if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
+      return res.status(403).json({ error: 'Forbidden' });
+
+    if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'No file uploaded' });
+
+    const filename = `clean_${id}_${Date.now()}.png`;
+    const dest = path.join(PHOTOS_DIR, filename);
+
+    fs.writeFileSync(dest, req.file.buffer);
+
+    // Build an absolute URL to the saved file (respecting host/protocol)
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    const fileUrl = `${protocol}://${host}/photos/${filename}`;
+
+    const updatedCard = await prisma.idCard.update({
+      where: { id },
+      data: { cleanPhotoUrl: fileUrl },
+    });
+
+    res.json({ message: 'Clean image saved', card: updatedCard });
+  } catch (err) {
+    console.error('❌ upload-clean failed:', err);
+    res.status(500).json({ error: 'Failed to save cleaned image', details: err.message });
+  }
+});
 
 // Start the server
 app.listen(PORT, () => {
