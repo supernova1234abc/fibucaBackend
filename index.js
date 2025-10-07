@@ -462,6 +462,7 @@ app.post('/api/idcards', authenticate, async (req, res) => {
  * ✅ PUT /api/idcards/:id/photo
  * Save Uploadcare photo URLs to ID card. The clean URL is derived using Uploadcare's transformation.
  */
+
 app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
