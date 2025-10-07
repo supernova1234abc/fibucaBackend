@@ -18,7 +18,17 @@ cloudinary.config({
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+const axios = require('axios'); // used to fetch raw image server-side
 
+// Try to load Python helper (optional)
+let removeBgBuffer = null;
+try {
+  const runner = require('./py-tools/utils/runPython');
+  removeBgBuffer = runner && runner.removeBackgroundBuffer;
+  console.log('runPython helper loaded:', !!removeBgBuffer);
+} catch (e) {
+  console.warn('runPython helper not available:', e.message || e);
+}
 
 const app = express()
 
@@ -847,6 +857,78 @@ app.post('/api/idcards/:id/upload-clean', authenticate, uploadPhoto.single('clea
   } catch (err) {
     console.error('❌ upload-clean failed:', err);
     res.status(500).json({ error: 'Failed to save cleaned image', details: err.message });
+  }
+});
+
+/**
+ * POST /api/idcards/:id/fetch-and-clean
+ * Fetch raw image server-side, attempt Python cleaning (if available),
+ * persist cleaned PNG (or original) to /photos and update idCard.cleanPhotoUrl.
+ */
+app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
+
+    const { rawPhotoUrl } = req.body;
+    if (!rawPhotoUrl) return res.status(400).json({ error: 'Missing rawPhotoUrl' });
+
+    const card = await prisma.idCard.findUnique({ where: { id } });
+    if (!card) return res.status(404).json({ error: 'ID card not found' });
+
+    if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
+      return res.status(403).json({ error: 'Forbidden' });
+
+    console.log(`[fetch-and-clean] fetching image from: ${rawPhotoUrl}`);
+
+    // 1) Fetch image bytes from rawPhotoUrl
+    const resp = await axios.get(rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
+    const buf = Buffer.from(resp.data);
+
+    // 2) Try server-side cleaning via Python helper if available
+    let finalBuffer = null;
+    let usedPython = false;
+    if (removeBgBuffer) {
+      try {
+        console.log('[fetch-and-clean] attempting Python bg removal...');
+        const cleaned = await removeBgBuffer(buf);
+        if (cleaned && Buffer.isBuffer(cleaned) && cleaned.length > 100) {
+          finalBuffer = cleaned;
+          usedPython = true;
+          console.log('[fetch-and-clean] Python cleaning succeeded.');
+        } else {
+          console.warn('[fetch-and-clean] Python cleaning returned invalid buffer, falling back.');
+        }
+      } catch (pyErr) {
+        console.warn('[fetch-and-clean] Python cleaning failed:', pyErr && pyErr.message ? pyErr.message : pyErr);
+      }
+    } else {
+      console.log('[fetch-and-clean] Python cleaner not configured; skipping.');
+    }
+
+    // 3) If Python didn't produce result, fall back to saving the original bytes
+    if (!finalBuffer) {
+      finalBuffer = buf;
+    }
+
+    // 4) Save buffer to /photos and update DB
+    const filename = `${usedPython ? 'clean' : 'raw'}_${id}_${Date.now()}.png`;
+    const dest = path.join(PHOTOS_DIR, filename);
+    fs.writeFileSync(dest, finalBuffer);
+
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    const fileUrl = `${protocol}://${host}/photos/${filename}`;
+
+    const updatedCard = await prisma.idCard.update({
+      where: { id },
+      data: { cleanPhotoUrl: fileUrl, rawPhotoUrl: rawPhotoUrl },
+    });
+
+    res.json({ message: 'Fetched and saved image', card: updatedCard });
+  } catch (err) {
+    console.error('❌ fetch-and-clean failed:', err);
+    res.status(500).json({ error: 'Failed to fetch or clean image', details: err.message });
   }
 });
 
