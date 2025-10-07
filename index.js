@@ -466,7 +466,6 @@ app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
 
-    // The frontend only needs to send the raw URL from Uploadcare.
     const { rawPhotoUrl } = req.body;
     if (!rawPhotoUrl)
       return res.status(400).json({ error: 'Missing rawPhotoUrl from frontend' });
@@ -477,19 +476,41 @@ app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
     if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
       return res.status(403).json({ error: 'Forbidden' });
 
-    // Construct the clean URL using Uploadcare's built-in transformation.
-    const cleanPhotoUrl = `${rawPhotoUrl}-/remove_bg/`;
+    console.log(`PUT /api/idcards/${id}/photo received rawPhotoUrl:`, rawPhotoUrl);
+
+    // Normalize rawPhotoUrl
+    const isAbsolute = /^https?:\/\//i.test(String(rawPhotoUrl));
+    const isUploadcareUuid = (s) =>
+      typeof s === 'string' &&
+      (/^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$/.test(s) ||
+       /^[a-zA-Z0-9\-_]{10,}$/.test(s)); // broad match for Uploadcare short ids
+
+    let normalizedRaw = String(rawPhotoUrl);
+
+    if (!isAbsolute) {
+      if (isUploadcareUuid(normalizedRaw)) {
+        normalizedRaw = `https://ucarecdn.com/${normalizedRaw.replace(/^\/+|\/+$/g, '')}/`;
+        console.log('Normalized Uploadcare UUID to CDN URL:', normalizedRaw);
+      } else {
+        // treat as backend-relative path
+        const backendUrl = (process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+        normalizedRaw = `${backendUrl}/${String(normalizedRaw).replace(/^\/+/, '')}`;
+        console.log('Normalized relative path to absolute URL:', normalizedRaw);
+      }
+    }
+
+    const cleanPhotoUrl = `${normalizedRaw}-/remove_bg/`;
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
       data: {
-        rawPhotoUrl,
+        rawPhotoUrl: normalizedRaw,
         cleanPhotoUrl,
       },
     });
 
     res.json({
-      message: '✅ Photo URLs saved successfully using Uploadcare.',
+      message: '✅ Photo URLs saved successfully (normalized).',
       card: updatedCard,
     });
   } catch (err) {
