@@ -9,7 +9,6 @@ const jwt = require('jsonwebtoken')
 const bcrypt = require('bcrypt')
 const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
-const supabase = require('./supabaseClient');
 const streamifier = require('streamifier') // ✅ const import style
 const { v2: cloudinary } = require('cloudinary');
 // Configure Cloudinary
@@ -71,8 +70,7 @@ app.use(cookieParser())
 // Serve static files
 // --------------------
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
-app.use('/photos', express.static(path.join(__dirname, 'photos')))
-
+// no local /photos static hosting anymore — cleaned images are uploaded to Cloudinary
 
 
 // ✅ Use memory storage for all uploads
@@ -577,12 +575,7 @@ app.delete('/api/idcards/:id', authenticate, async (req, res) => {
 
     await prisma.idCard.delete({ where: { id } });
 
-    if (card.photoUrl) {
-      const filename = path.basename(card.photoUrl);
-      await supabase.storage.from('idcards').remove([filename]);
-    }
-
-    res.json({ message: 'ID card and photo deleted' });
+    res.json({ message: 'ID card deleted' });
   } catch (err) {
     console.error('❌ DELETE /api/idcards/:id failed:', err);
     res.status(500).json({ error: 'Failed to delete ID card' });
@@ -817,13 +810,11 @@ app.delete('/submissions/:id', authenticate, async (req, res) => {
   }
 })
 
-// ensure photos directory exists
-const PHOTOS_DIR = path.join(__dirname, 'photos');
-if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+// (no local photos directory — Cloudinary used for cleaned images)
 
 /**
  * POST /api/idcards/:id/upload-clean
- * Accept cleaned image (PNG) from browser, save to /photos and update idCard.cleanPhotoUrl
+ * Accept cleaned image (PNG) from browser, upload to Cloudinary and update idCard.cleanPhotoUrl
  */
 app.post('/api/idcards/:id/upload-clean', authenticate, uploadPhoto.single('cleanImage'), async (req, res) => {
   try {
@@ -838,32 +829,38 @@ app.post('/api/idcards/:id/upload-clean', authenticate, uploadPhoto.single('clea
 
     if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'No file uploaded' });
 
-    const filename = `clean_${id}_${Date.now()}.png`;
-    const dest = path.join(PHOTOS_DIR, filename);
+    // Upload cleaned buffer to Cloudinary
+    const publicId = `idcard_clean_${id}_${Date.now()}`;
+    const uploadResult = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        { folder: 'fibuca/idcards', public_id: publicId, resource_type: 'image', format: 'png' },
+        (err, result) => (err ? reject(err) : resolve(result))
+      );
+      streamifier.createReadStream(req.file.buffer).pipe(stream);
+    });
 
-    fs.writeFileSync(dest, req.file.buffer);
-
-    // Build an absolute URL to the saved file (respecting host/protocol)
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const host = req.get('host');
-    const fileUrl = `${protocol}://${host}/photos/${filename}`;
+    const fileUrl = uploadResult?.secure_url || null;
+    if (!fileUrl) {
+      console.warn('Cloudinary upload returned no URL, falling back to returning error.');
+      return res.status(500).json({ error: 'Cloudinary upload failed' });
+    }
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
       data: { cleanPhotoUrl: fileUrl },
     });
 
-    res.json({ message: 'Clean image saved', card: updatedCard });
+    res.json({ message: 'Clean image uploaded to Cloudinary', card: updatedCard });
   } catch (err) {
     console.error('❌ upload-clean failed:', err);
-    res.status(500).json({ error: 'Failed to save cleaned image', details: err.message });
+    res.status(500).json({ error: 'Failed to upload cleaned image', details: err.message });
   }
 });
 
 /**
  * POST /api/idcards/:id/fetch-and-clean
  * Fetch raw image server-side, attempt Python cleaning (if available),
- * persist cleaned PNG (or original) to /photos and update idCard.cleanPhotoUrl.
+ * upload cleaned PNG (or original) to Cloudinary and update idCard.cleanPhotoUrl.
  */
 app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
   try {
@@ -906,26 +903,33 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
       console.log('[fetch-and-clean] Python cleaner not configured; skipping.');
     }
 
-    // 3) If Python didn't produce result, fall back to saving the original bytes
+    // 3) If Python didn't produce result, fall back to original bytes (convert to PNG if needed)
     if (!finalBuffer) {
       finalBuffer = buf;
     }
 
-    // 4) Save buffer to /photos and update DB
-    const filename = `${usedPython ? 'clean' : 'raw'}_${id}_${Date.now()}.png`;
-    const dest = path.join(PHOTOS_DIR, filename);
-    fs.writeFileSync(dest, finalBuffer);
+    // If the source is not PNG, ensure Cloudinary stores PNG by uploading buffer as PNG stream.
+    const publicId = `idcard_fetched_${id}_${Date.now()}`;
+    const uploadResult = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        { folder: 'fibuca/idcards', public_id: publicId, resource_type: 'image', format: 'png' },
+        (err, result) => (err ? reject(err) : resolve(result))
+      );
+      streamifier.createReadStream(finalBuffer).pipe(stream);
+    });
 
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const host = req.get('host');
-    const fileUrl = `${protocol}://${host}/photos/${filename}`;
+    const fileUrl = uploadResult?.secure_url || null;
+    if (!fileUrl) {
+      console.warn('[fetch-and-clean] Cloudinary upload returned no URL');
+      return res.status(500).json({ error: 'Cloudinary upload failed' });
+    }
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
       data: { cleanPhotoUrl: fileUrl, rawPhotoUrl: rawPhotoUrl },
     });
 
-    res.json({ message: 'Fetched and saved image', card: updatedCard });
+    res.json({ message: 'Fetched and uploaded image to Cloudinary', card: updatedCard });
   } catch (err) {
     console.error('❌ fetch-and-clean failed:', err);
     res.status(500).json({ error: 'Failed to fetch or clean image', details: err.message });
