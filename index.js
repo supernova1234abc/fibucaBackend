@@ -256,6 +256,19 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
     const form = JSON.parse(req.body.data);
     if (!req.file) return res.status(400).json({ error: "No PDF uploaded" });
 
+    // Verify Cloudinary is configured
+    if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY) {
+      console.error('❌ Cloudinary not configured. Missing env vars:', {
+        CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
+        CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
+        CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
+      });
+      return res.status(500).json({ 
+        error: 'Server misconfigured: Cloudinary not set up. Contact admin.',
+        details: 'Missing Cloudinary environment variables'
+      });
+    }
+
     // 2️⃣ Prepare Cloudinary upload stream
     const publicId = `form_${form.employeeNumber}_${Date.now()}`;
     const uploadStream = () =>
