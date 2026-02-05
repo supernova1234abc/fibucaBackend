@@ -4,17 +4,7 @@
   "outputDirectory": ".",
   "public": false,
   "env": {
-    "NODE_ENV": "production",
-    "DATABASE_URL": "@database_url",
-    "PRISMA_DATABASE_URL": "@prisma_database_url",
-    "POSTGRES_URL": "@postgres_url",
-    "JWT_SECRET": "@jwt_secret",
-    "CLOUDINARY_CLOUD_NAME": "@cloudinary_cloud_name",
-    "CLOUDINARY_API_KEY": "@cloudinary_api_key",
-    "CLOUDINARY_API_SECRET": "@cloudinary_api_secret",
-    "VITE_FRONTEND_URL": "@vite_frontend_url",
-    "VITE_APP_SUPABASE_URL": "@vite_app_supabase_url",
-    "VITE_APP_SUPABASE_ANON_KEY": "@vite_app_supabase_anon_key"
+    "NODE_ENV": "production"
   },
   "functions": {
     "index.js": {

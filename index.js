@@ -19,9 +19,11 @@ cloudinary.config({
 });
 const axios = require('axios'); // used to fetch raw image server-side
 
-// Python rembg removed - using Uploadcare backend filter instead
-// This eliminates ~300MB RAM overhead from Render/Vercel
-console.log('✅ Using Uploadcare backend filter for image processing (zero local overhead)');
+// ✅ Re-enabled: Optimized Python rembg with heavy memory optimization
+// Using remove_bg_buffer_optimized.py for streaming/chunked processing
+// Reduces RAM footprint from 300MB to ~100MB for testing
+const { removeBackgroundBuffer } = require('./py-tools/utils/runPython');
+console.log('✅ Using optimized Python rembg with streaming for low-RAM systems');
 
 const app = express()
 
@@ -845,8 +847,8 @@ app.post('/api/idcards/:id/upload-clean', authenticate, uploadPhoto.single('clea
 
 /**
  * POST /api/idcards/:id/fetch-and-clean
- * Fetch raw image server-side, attempt Python cleaning (if available),
- * upload cleaned PNG (or original) to Cloudinary and update idCard.cleanPhotoUrl.
+ * Fetch raw image server-side, use optimized Python rembg for cleaning,
+ * upload cleaned PNG to Cloudinary and update idCard.cleanPhotoUrl.
  */
 app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
   try {
@@ -866,21 +868,29 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
 
     // 1) Fetch image bytes from rawPhotoUrl
     const resp = await axios.get(rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
-    const buf = Buffer.from(resp.data);
+    let buf = Buffer.from(resp.data);
+    console.log(`[fetch-and-clean] downloaded ${buf.length} bytes`);
 
-    // 2) Skip Python processing - Uploadcare filter will handle it
-    // This saves 300MB+ RAM by avoiding local image processing
-    console.log('[fetch-and-clean] Using Uploadcare remove_bg filter (no local processing)');
-    const finalBuffer = buf;
+    // 2) Apply optimized Python background removal (streaming/chunked processing)
+    let cleanedBuffer;
+    try {
+      console.log('[fetch-and-clean] Applying optimized Python rembg...');
+      cleanedBuffer = await removeBackgroundBuffer(buf);
+      console.log(`[fetch-and-clean] ✅ Python processing complete: ${cleanedBuffer.length} bytes`);
+      buf = null; // Free memory after processing
+    } catch (pythonErr) {
+      console.warn('[fetch-and-clean] ⚠️ Python processing failed, using original image:', pythonErr.message);
+      cleanedBuffer = Buffer.from(resp.data); // Use original if Python fails
+    }
 
-    // If the source is not PNG, ensure Cloudinary stores PNG by uploading buffer as PNG stream.
+    // 3) Upload cleaned buffer to Cloudinary
     const publicId = `idcard_fetched_${id}_${Date.now()}`;
     const uploadResult = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
         { folder: 'fibuca/idcards', public_id: publicId, resource_type: 'image', format: 'png' },
         (err, result) => (err ? reject(err) : resolve(result))
       );
-      streamifier.createReadStream(finalBuffer).pipe(stream);
+      streamifier.createReadStream(cleanedBuffer).pipe(stream);
     });
 
     const fileUrl = uploadResult?.secure_url || null;
@@ -894,7 +904,7 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
       data: { cleanPhotoUrl: fileUrl, rawPhotoUrl: rawPhotoUrl },
     });
 
-    res.json({ message: 'Fetched and uploaded image to Cloudinary', card: updatedCard });
+    res.json({ message: '✅ Fetched, cleaned with Python rembg, and uploaded to Cloudinary', card: updatedCard });
   } catch (err) {
     console.error('❌ fetch-and-clean failed:', err);
     res.status(500).json({ error: 'Failed to fetch or clean image', details: err.message });

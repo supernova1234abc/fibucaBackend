@@ -16,7 +16,8 @@ async function removeBackgroundBuffer(fileBuffer, pythonPath) {
     console.warn('⚠️ Venv python not found, using system python');
   }
 
-  const scriptPath = path.join(__dirname, 'remove_bg_buffer.py');
+  // ✅ Use optimized version for low-RAM systems (500MB limit)
+  const scriptPath = path.join(__dirname, '../remove_bg_buffer_optimized.py');
 
   return new Promise((resolve, reject) => {
     const pyProcess = spawn(pythonExec, [scriptPath]);
