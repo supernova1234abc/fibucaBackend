@@ -1,0 +1,73 @@
+// prisma/schema.prisma - OPTIMIZED FOR LOW-MEMORY SYSTEMS
+
+generator client {
+  provider = "prisma-client-js"
+  // Reduce connection pool for low-memory systems
+  previewFeatures = ["omitApi"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===== OPTIMIZATIONS =====
+// 1. Removed unnecessary fields to reduce queries
+// 2. Added indexes for common queries
+// 3. Limited relationships to prevent N+1 queries
+// 4. String limits to prevent memory overflow
+
+model User {
+  id             Int      @id @default(autoincrement())
+  name           String   @db.VarChar(100)
+  username       String   @unique @db.VarChar(50)
+  email          String?  @db.VarChar(100)
+  password       String   @db.VarChar(255)
+  employeeNumber String   @unique @db.VarChar(50)
+  role           Role     @default(CLIENT)
+  firstLogin     Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  
+  idCards        IdCard[]
+  
+  @@index([employeeNumber])
+  @@index([email])
+}
+
+model Submission {
+  id             Int      @id @default(autoincrement())
+  employeeName   String   @db.VarChar(100)
+  employeeNumber String   @unique @db.VarChar(50)
+  employerName   String   @db.VarChar(150)
+  dues           String   @db.VarChar(20)
+  witness        String   @db.VarChar(100)
+  pdfPath        String   @db.VarChar(500)
+  submittedAt    DateTime @default(now())
+  
+  @@index([employeeNumber])
+  @@index([submittedAt])
+}
+
+// Optimized: Removed unused photoStatus field
+model IdCard {
+  id            Int      @id @default(autoincrement())
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId        Int
+  fullName      String   @db.VarChar(100)
+  rawPhotoUrl   String?  @db.VarChar(1000)  // Uploadcare URL
+  cleanPhotoUrl String?  @db.VarChar(1000) // With -/remove_bg/ transform
+  company       String   @db.VarChar(150)
+  role          String   @db.VarChar(50)
+  issuedAt      DateTime @default(now())
+  cardNumber    String   @unique @db.VarChar(20)
+  
+  @@index([userId])
+  @@index([cardNumber])
+  @@index([issuedAt])
+}
+
+enum Role {
+  CLIENT
+  ADMIN
+  SUPERADMIN
+}

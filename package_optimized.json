@@ -6,14 +6,26 @@
   "scripts": {
     "dev": "nodemon index.js",
     "start": "node index.js",
-    "build": "prisma generate",
-    "build:prisma": "prisma generate",
+    "start:low-ram": "NODE_OPTIONS='--max-old-space-size=256' node index.js",
+    "start:debug": "NODE_OPTIONS='--max-old-space-size=256' node --inspect=9229 index.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop fibuca-backend",
+    "pm2:logs": "pm2 logs fibuca-backend",
+    "migrate": "npx prisma migrate deploy",
+    "migrate:dev": "npx prisma migrate dev",
+    "db:push": "npx prisma db push",
+    "prisma:generate": "npx prisma generate",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": [
+    "fibuca",
+    "backend",
+    "express",
+    "prisma"
+  ],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Fibuca backend - optimized for low-RAM systems",
   "dependencies": {
     "@prisma/client": "^6.11.1",
     "@supabase/supabase-js": "^2.57.4",
@@ -21,10 +33,12 @@
     "bcrypt": "^6.0.0",
     "body-parser": "^2.2.0",
     "cloudinary": "^2.7.0",
+    "compression": "^1.7.4",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.2.0",
     "express": "^5.1.0",
+    "express-rate-limit": "^7.1.5",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.1",
     "next-auth": "^4.24.11",
@@ -33,6 +47,11 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.10",
+    "pm2": "^5.3.0",
     "prisma": "^6.11.1"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
   }
 }

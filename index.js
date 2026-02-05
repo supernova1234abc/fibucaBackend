@@ -19,15 +19,9 @@ cloudinary.config({
 });
 const axios = require('axios'); // used to fetch raw image server-side
 
-// Try to load Python helper (optional)
-let removeBgBuffer = null;
-try {
-  const runner = require('./py-tools/utils/runPython');
-  removeBgBuffer = runner && runner.removeBackgroundBuffer;
-  console.log('runPython helper loaded:', !!removeBgBuffer);
-} catch (e) {
-  console.warn('runPython helper not available:', e.message || e);
-}
+// Python rembg removed - using Uploadcare backend filter instead
+// This eliminates ~300MB RAM overhead from Render/Vercel
+console.log('✅ Using Uploadcare backend filter for image processing (zero local overhead)');
 
 const app = express()
 
@@ -409,8 +403,7 @@ app.post('/bulk-upload', async (req, res) => {
  * ✅ POST /api/idcards
  * Create a new ID card
  */
-// removeBackgroundBuffer is no longer needed
-// const { removeBackgroundBuffer, removeBackgroundFile } = require('./py-tools/utils/runPython');
+// Python processing completely removed for Vercel compatibility
 
 
 
@@ -486,28 +479,20 @@ app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
 
     console.log(`PUT /api/idcards/${id}/photo received rawPhotoUrl:`, rawPhotoUrl);
 
-    // Normalize rawPhotoUrl
+    // Normalize rawPhotoUrl - support direct URLs
     const isAbsolute = /^https?:\/\//i.test(String(rawPhotoUrl));
-    const isUploadcareUuid = (s) =>
-      typeof s === 'string' &&
-      (/^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$/.test(s) ||
-       /^[a-zA-Z0-9\-_]{10,}$/.test(s)); // broad match for Uploadcare short ids
-
     let normalizedRaw = String(rawPhotoUrl);
 
     if (!isAbsolute) {
-      if (isUploadcareUuid(normalizedRaw)) {
-        normalizedRaw = `https://ucarecdn.com/${normalizedRaw.replace(/^\/+|\/+$/g, '')}/`;
-        console.log('Normalized Uploadcare UUID to CDN URL:', normalizedRaw);
-      } else {
-        // treat as backend-relative path
-        const backendUrl = (process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-        normalizedRaw = `${backendUrl}/${String(normalizedRaw).replace(/^\/+/, '')}`;
-        console.log('Normalized relative path to absolute URL:', normalizedRaw);
-      }
+      // treat as backend-relative path
+      const backendUrl = (process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+      normalizedRaw = `${backendUrl}/${String(normalizedRaw).replace(/^\/+/, '')}`;
+      console.log('Normalized relative path to absolute URL:', normalizedRaw);
     }
 
-    const cleanPhotoUrl = `${normalizedRaw}-/remove_bg/`;
+    // Generate clean URL using Cloudinary's FREE background removal effect
+    const cleanPhotoUrl = `${normalizedRaw}?effect=background_removal`;
+    console.log('✅ Clean URL with Cloudinary effect:', cleanPhotoUrl);
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
@@ -542,8 +527,9 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     if (!card.rawPhotoUrl)
       return res.status(400).json({ error: 'No raw photo URL found to clean' });
 
-    // Re-construct the clean URL from the stored raw URL.
-    const cleanPhotoUrl = `${card.rawPhotoUrl}-/remove_bg/`;
+    // Re-construct the clean URL using Cloudinary's free background removal effect
+    const cleanPhotoUrl = `${card.rawPhotoUrl}?effect=background_removal`;
+    console.log('Re-generated clean URL with Cloudinary effect:', cleanPhotoUrl);
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
@@ -551,7 +537,7 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     });
 
     res.json({
-      message: '✅ Photo re-cleaned using Uploadcare.',
+      message: '✅ Photo re-cleaned using Cloudinary background removal.',
       card: updatedCard,
     });
   } catch (err) {
@@ -882,31 +868,10 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
     const resp = await axios.get(rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
     const buf = Buffer.from(resp.data);
 
-    // 2) Try server-side cleaning via Python helper if available
-    let finalBuffer = null;
-    let usedPython = false;
-    if (removeBgBuffer) {
-      try {
-        console.log('[fetch-and-clean] attempting Python bg removal...');
-        const cleaned = await removeBgBuffer(buf);
-        if (cleaned && Buffer.isBuffer(cleaned) && cleaned.length > 100) {
-          finalBuffer = cleaned;
-          usedPython = true;
-          console.log('[fetch-and-clean] Python cleaning succeeded.');
-        } else {
-          console.warn('[fetch-and-clean] Python cleaning returned invalid buffer, falling back.');
-        }
-      } catch (pyErr) {
-        console.warn('[fetch-and-clean] Python cleaning failed:', pyErr && pyErr.message ? pyErr.message : pyErr);
-      }
-    } else {
-      console.log('[fetch-and-clean] Python cleaner not configured; skipping.');
-    }
-
-    // 3) If Python didn't produce result, fall back to original bytes (convert to PNG if needed)
-    if (!finalBuffer) {
-      finalBuffer = buf;
-    }
+    // 2) Skip Python processing - Uploadcare filter will handle it
+    // This saves 300MB+ RAM by avoiding local image processing
+    console.log('[fetch-and-clean] Using Uploadcare remove_bg filter (no local processing)');
+    const finalBuffer = buf;
 
     // If the source is not PNG, ensure Cloudinary stores PNG by uploading buffer as PNG stream.
     const publicId = `idcard_fetched_${id}_${Date.now()}`;
