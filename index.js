@@ -269,6 +269,32 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       });
     }
 
+    // ---------- GET /api/download/:id ----------
+// Allow ADMIN/SUPERADMIN to download a submission's PDF
+app.get('/api/download/:id', authenticate, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid submission ID' });
+
+    const submission = await prisma.submission.findUnique({ where: { id } });
+    if (!submission || !submission.pdfPath) {
+      return res.status(404).json({ error: 'No PDF found for this submission' });
+    }
+
+    // Role check: clients can only download their own
+    if (req.user.role === 'CLIENT' && req.user.employeeNumber !== submission.employeeNumber) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    // Redirect to Cloudinary secure URL
+    return res.redirect(submission.pdfPath);
+  } catch (err) {
+    console.error('❌ GET /api/download/:id failed:', err);
+    res.status(500).json({ error: 'Failed to download PDF' });
+  }
+});
+
+
     // 2️⃣ Prepare Cloudinary upload stream
     const publicId = `form_${form.employeeNumber}_${Date.now()}`;
     const uploadStream = () =>
