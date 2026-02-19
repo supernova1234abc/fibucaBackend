@@ -30,17 +30,24 @@ const app = express()
 // ---------- CORS Setup ----------
 const allowedOrigins = [
   process.env.VITE_FRONTEND_URL || "http://localhost:5173",
-  "https://fibuca-frontend.vercel.app"
+  "https://fibuca-frontend.vercel.app",
+  "http://localhost:3000",
+  "http://localhost:5173"
 ];
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   
-  if (!origin || allowedOrigins.includes(origin)) {
+  // Allow if origin is in whitelist, or allow all for development
+  const isDevelopment = process.env.NODE_ENV !== 'production';
+  const isAllowed = !origin || allowedOrigins.includes(origin) || isDevelopment;
+  
+  if (isAllowed) {
     res.setHeader('Access-Control-Allow-Origin', origin || '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Max-Age', '86400');
   }
 
   // Handle preflight
@@ -58,8 +65,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 
 
 // Parse JSON / URL-encoded requests
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
+app.use(express.json({ limit: '50mb' }))
+app.use(express.urlencoded({ extended: true, limit: '50mb' }))
 app.use(cookieParser())
 
 // --------------------
@@ -70,10 +77,35 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
 
 
 // ✅ Use memory storage for all uploads
-const MAX_PHOTO_BYTES = 3 * 1024 * 1024; // 3MB
-const uploadPDF = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES } });
-const uploadPhoto = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES } });
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10MB (increased for PDF)
+const uploadPDF = multer({ 
+  storage: multer.memoryStorage(), 
+  limits: { fileSize: MAX_PHOTO_BYTES },
+  timeout: 60000 
+});
+const uploadPhoto = multer({ 
+  storage: multer.memoryStorage(), 
+  limits: { fileSize: MAX_PHOTO_BYTES },
+  timeout: 60000 
+});
 
+
+// ✅ REQUEST TIMEOUT HANDLER FOR MOBILE
+app.use((req, res, next) => {
+  // 60 seconds for file uploads, 30 seconds for others
+  const timeout = req.path.includes('/submit-form') || req.path.includes('/upload') ? 60000 : 30000;
+  req.setTimeout(timeout);
+  res.setTimeout(timeout);
+
+  req.on('timeout', () => {
+    console.warn(`⚠️ Request timeout on ${req.method} ${req.path}`);
+    if (!res.headersSent) {
+      res.status(408).json({ error: 'Request timeout. Please check your connection and try again.' });
+    }
+  });
+
+  next();
+});
 
 // --------------------
 // Auth middleware
@@ -252,9 +284,20 @@ app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
 // ---------- POST /submit-form ----------
 app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
   try {
+    console.log("📥 /submit-form request received from:", req.headers.origin);
+    console.log("📦 File received:", req.file ? `${req.file.originalname} (${req.file.size} bytes)` : "No file");
+    console.log("📋 Form data:", req.body.data ? "Present" : "Missing");
+
     // 1️⃣ Parse form JSON from frontend
+    if (!req.body.data) {
+      return res.status(400).json({ error: "Missing form data" });
+    }
+    
     const form = JSON.parse(req.body.data);
-    if (!req.file) return res.status(400).json({ error: "No PDF uploaded" });
+    
+    if (!req.file) {
+      return res.status(400).json({ error: "No PDF uploaded. Please ensure the PDF was generated correctly." });
+    }
 
     // Verify Cloudinary is configured
     if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY) {
