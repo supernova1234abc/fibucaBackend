@@ -32,7 +32,6 @@ const allowedOrigins = [
   process.env.VITE_FRONTEND_URL || "http://localhost:5173",
   "https://fibuca-frontend.vercel.app",
   "http://localhost:3000",
-  "http://localhost:5173"
 ];
 
 app.use((req, res, next) => {
@@ -105,6 +104,18 @@ app.use((req, res, next) => {
   });
 
   next();
+});
+
+// ✅ HEALTH CHECK ENDPOINT FOR MOBILE CONNECTIVITY TESTING
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    backend: 'fibuca-backend',
+    cloudinary: {
+      configured: !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY)
+    }
+  });
 });
 
 // --------------------
