@@ -80,24 +80,28 @@ const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10MB (increased for PDF)
 const uploadPDF = multer({ 
   storage: multer.memoryStorage(), 
   limits: { fileSize: MAX_PHOTO_BYTES },
-  timeout: 60000 
+  timeout: 120000 
 });
 const uploadPhoto = multer({ 
   storage: multer.memoryStorage(), 
   limits: { fileSize: MAX_PHOTO_BYTES },
-  timeout: 60000 
+  timeout: 120000 
 });
 
 
 // ✅ REQUEST TIMEOUT HANDLER FOR MOBILE
 app.use((req, res, next) => {
-  // 60 seconds for file uploads, 30 seconds for others
-  const timeout = req.path.includes('/submit-form') || req.path.includes('/upload') ? 60000 : 30000;
+  // 120 seconds for file uploads, 60 seconds for others (increased for mobile)
+  const timeout = req.path.includes('/submit-form') || req.path.includes('/upload') ? 120000 : 60000;
   req.setTimeout(timeout);
   res.setTimeout(timeout);
 
   req.on('timeout', () => {
     console.warn(`⚠️ Request timeout on ${req.method} ${req.path}`);
+    if (!res.headersSent) {
+      res.status(408).json({ error: 'Request timeout. Please try again.' });
+    }
+  });
     if (!res.headersSent) {
       res.status(408).json({ error: 'Request timeout. Please check your connection and try again.' });
     }
