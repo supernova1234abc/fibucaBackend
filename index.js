@@ -104,7 +104,11 @@ app.use(cookieParser())
 // Serve static files
 // --------------------
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
-// no local /photos static hosting anymore — cleaned images are uploaded to Cloudinary
+// ensure photos directory exists (backend may run without it)
+const photosDir = path.join(__dirname, 'photos');
+if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
+// serve photos directory for locally processed ID card images
+app.use('/photos', express.static(photosDir))
 
 
 // ✅ Use memory storage for all uploads
@@ -537,62 +541,71 @@ app.post('/api/idcards', authenticate, async (req, res) => {
 
 /**
  * ✅ PUT /api/idcards/:id/photo
- * Save Uploadcare photo URLs to ID card. The clean URL is derived using Uploadcare's transformation.
- */
+ * Upload a raw ID card photo, run Python rembg to remove background, and save both
+* raw and cleaned images to the local `photos/` folder.  Updates DB with local URLs.
+*/
 
-app.put('/api/idcards/:id/photo', authenticate, async (req, res) => {
+// new endpoint: upload raw image and clean locally
+app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
 
-    const { rawPhotoUrl } = req.body;
-    if (!rawPhotoUrl)
-      return res.status(400).json({ error: 'Missing rawPhotoUrl from frontend' });
-
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
-
     if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
       return res.status(403).json({ error: 'Forbidden' });
 
-    console.log(`PUT /api/idcards/${id}/photo received rawPhotoUrl:`, rawPhotoUrl);
-
-    // Normalize rawPhotoUrl - support direct URLs
-    const isAbsolute = /^https?:\/\//i.test(String(rawPhotoUrl));
-    let normalizedRaw = String(rawPhotoUrl);
-
-    if (!isAbsolute) {
-      // treat as backend-relative path
-      const backendUrl = (process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-      normalizedRaw = `${backendUrl}/${String(normalizedRaw).replace(/^\/+/, '')}`;
-      console.log('Normalized relative path to absolute URL:', normalizedRaw);
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'No photo file uploaded' });
     }
 
-    // Generate clean URL using Cloudinary's FREE background removal effect
-    const cleanPhotoUrl = `${normalizedRaw}?effect=background_removal`;
-    console.log('✅ Clean URL with Cloudinary effect:', cleanPhotoUrl);
+    // ensure photos directory exists
+    const photosDir = path.join(__dirname, 'photos');
+    if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
+
+    const ext = path.extname(req.file.originalname) || '.png';
+    const rawFilename = `idcard_${id}_raw_${Date.now()}${ext}`;
+    const rawPath = path.join(photosDir, rawFilename);
+    fs.writeFileSync(rawPath, req.file.buffer);
+
+    let cleanedBuffer;
+    try {
+      cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
+    } catch (pyErr) {
+      console.warn('[idcard/photo] Python rembg failed, proceeding without clean image:', pyErr.message);
+    }
+
+    let cleanUrl = '';
+    if (cleanedBuffer) {
+      const cleanFilename = `idcard_${id}_clean_${Date.now()}.png`;
+      const cleanPath = path.join(photosDir, cleanFilename);
+      fs.writeFileSync(cleanPath, cleanedBuffer);
+      cleanUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
+    }
+
+    const rawUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${rawFilename}`;
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
       data: {
-        rawPhotoUrl: normalizedRaw,
-        cleanPhotoUrl,
+        rawPhotoUrl: rawUrl,
+        cleanPhotoUrl: cleanUrl,
       },
     });
 
-    res.json({
-      message: '✅ Photo URLs saved successfully (normalized).',
-      card: updatedCard,
-    });
+    res.json({ message: '✅ Photo uploaded and processed locally', card: updatedCard });
   } catch (err) {
     console.error('❌ PUT /api/idcards/:id/photo failed:', err);
-    res.status(500).json({ error: 'Failed to save photo URLs', details: err.message });
+    res.status(500).json({ error: 'Failed to save photo', details: err.message });
   }
 });
 
 /**
  * ✅ PUT /api/idcards/:id/clean-photo
- * Re-generate the clean photo URL using Uploadcare's remove_bg filter.
+ * Re-run Python rembg on the existing raw photo and overwrite the clean image
+ * (useful if the backend Python script or parameters change).  Works with
+ * locally stored photos or remote URLs.
  */
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
   try {
@@ -605,9 +618,21 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     if (!card.rawPhotoUrl)
       return res.status(400).json({ error: 'No raw photo URL found to clean' });
 
-    // Re-construct the clean URL using Cloudinary's free background removal effect
-    const cleanPhotoUrl = `${card.rawPhotoUrl}?effect=background_removal`;
-    console.log('Re-generated clean URL with Cloudinary effect:', cleanPhotoUrl);
+    // fetch raw bytes (either local file or remote URL)
+    let buf;
+    if (/^https?:\/\//.test(card.rawPhotoUrl)) {
+      const resp = await axios.get(card.rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
+      buf = Buffer.from(resp.data);
+    } else {
+      const fname = path.basename(card.rawPhotoUrl);
+      buf = fs.readFileSync(path.join(__dirname, 'photos', fname));
+    }
+
+    const cleaned = await removeBackgroundBuffer(buf);
+    const cleanFilename = `idcard_${id}_clean_${Date.now()}.png`;
+    const cleanPath = path.join(__dirname, 'photos', cleanFilename);
+    fs.writeFileSync(cleanPath, cleaned);
+    const cleanPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
@@ -874,52 +899,7 @@ app.delete('/submissions/:id', authenticate, async (req, res) => {
   }
 })
 
-// (no local photos directory — Cloudinary used for cleaned images)
-
-/**
- * POST /api/idcards/:id/upload-clean
- * Accept cleaned image (PNG) from browser, upload to Cloudinary and update idCard.cleanPhotoUrl
- */
-app.post('/api/idcards/:id/upload-clean', authenticate, uploadPhoto.single('cleanImage'), async (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
-
-    const card = await prisma.idCard.findUnique({ where: { id } });
-    if (!card) return res.status(404).json({ error: 'ID card not found' });
-
-    if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
-      return res.status(403).json({ error: 'Forbidden' });
-
-    if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'No file uploaded' });
-
-    // Upload cleaned buffer to Cloudinary
-    const publicId = `idcard_clean_${id}_${Date.now()}`;
-    const uploadResult = await new Promise((resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
-        { folder: 'fibuca/idcards', public_id: publicId, resource_type: 'image', format: 'png' },
-        (err, result) => (err ? reject(err) : resolve(result))
-      );
-      streamifier.createReadStream(req.file.buffer).pipe(stream);
-    });
-
-    const fileUrl = uploadResult?.secure_url || null;
-    if (!fileUrl) {
-      console.warn('Cloudinary upload returned no URL, falling back to returning error.');
-      return res.status(500).json({ error: 'Cloudinary upload failed' });
-    }
-
-    const updatedCard = await prisma.idCard.update({
-      where: { id },
-      data: { cleanPhotoUrl: fileUrl },
-    });
-
-    res.json({ message: 'Clean image uploaded to Cloudinary', card: updatedCard });
-  } catch (err) {
-    console.error('❌ upload-clean failed:', err);
-    res.status(500).json({ error: 'Failed to upload cleaned image', details: err.message });
-  }
-});
+// (photos directory is now served above; cleaned images saved locally)
 
 /**
  * POST /api/idcards/:id/fetch-and-clean
@@ -959,28 +939,20 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
       cleanedBuffer = Buffer.from(resp.data); // Use original if Python fails
     }
 
-    // 3) Upload cleaned buffer to Cloudinary
-    const publicId = `idcard_fetched_${id}_${Date.now()}`;
-    const uploadResult = await new Promise((resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
-        { folder: 'fibuca/idcards', public_id: publicId, resource_type: 'image', format: 'png' },
-        (err, result) => (err ? reject(err) : resolve(result))
-      );
-      streamifier.createReadStream(cleanedBuffer).pipe(stream);
-    });
-
-    const fileUrl = uploadResult?.secure_url || null;
-    if (!fileUrl) {
-      console.warn('[fetch-and-clean] Cloudinary upload returned no URL');
-      return res.status(500).json({ error: 'Cloudinary upload failed' });
-    }
+    // 3) save cleaned buffer locally in photos directory
+    const photosDir = path.join(__dirname, 'photos');
+    if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
+    const cleanFilename = `idcard_fetched_${id}_${Date.now()}.png`;
+    const cleanPath = path.join(photosDir, cleanFilename);
+    fs.writeFileSync(cleanPath, cleanedBuffer);
+    const cleanUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
-      data: { cleanPhotoUrl: fileUrl, rawPhotoUrl: rawPhotoUrl },
+      data: { cleanPhotoUrl: cleanUrl, rawPhotoUrl: rawPhotoUrl },
     });
 
-    res.json({ message: '✅ Fetched, cleaned with Python rembg, and uploaded to Cloudinary', card: updatedCard });
+    res.json({ message: '✅ Fetched, cleaned with Python rembg, and saved locally', card: updatedCard });
   } catch (err) {
     console.error('❌ fetch-and-clean failed:', err);
     res.status(500).json({ error: 'Failed to fetch or clean image', details: err.message });
