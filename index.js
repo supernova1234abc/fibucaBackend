@@ -27,29 +27,44 @@ console.log('✅ Using optimized Python rembg with streaming for low-RAM systems
 
 const app = express()
 
-// ---------- CORS Setup ----------
-const allowedOrigins = [
-  process.env.VITE_FRONTEND_URL || "http://localhost:5173",
-  "https://fibuca-frontend.vercel.app"
-];
+// ---------- CORS & upload configuration ----------
+// Use environment variable CORS_ORIGIN when available; fall back to
+// legacy VITE_FRONTEND_URL and hard‑coded production domains.
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(",").map(o => o.trim())
+  : [
+      process.env.VITE_FRONTEND_URL || "http://localhost:5173",
+      "https://fibuca-frontend.vercel.app",
+    ];
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  
-  if (!origin || allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  }
+// Attach CORS middleware globally.  This ensures headers are set on every
+// response, including error cases such as multer size limits or Vercel
+// platform rejections (413) so the browser doesn't complain about missing
+// Access-Control-Allow-Origin.
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // allow requests with no origin (curl, mobile apps, same‑origin etc.)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      console.warn("🚫 CORS origin rejected:", origin);
+      return callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
-  // Handle preflight
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
-  }
+// parse upload size limit from environment or default to 3MB
+const MAX_PHOTO_BYTES = parseInt(process.env.UPLOAD_SIZE_LIMIT || String(3 * 1024 * 1024), 10);
 
-  next();
-});
+console.log('🛡️ CORS allowed origins:', allowedOrigins);
+console.log('📦 upload size limit bytes:', MAX_PHOTO_BYTES);
+
+// memory storage for uploads uses the limit variable now
+const uploadPDF = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES } });
+const uploadPhoto = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES } });
 
 const prisma = new PrismaClient()
 const PORT = process.env.PORT
@@ -70,9 +85,8 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
 
 
 // ✅ Use memory storage for all uploads
-const MAX_PHOTO_BYTES = 3 * 1024 * 1024; // 3MB
-const uploadPDF = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES } });
-const uploadPhoto = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES } });
+// replaced above with environment-driven configuration
+
 
 
 // --------------------
@@ -948,6 +962,27 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
     console.error('❌ fetch-and-clean failed:', err);
     res.status(500).json({ error: 'Failed to fetch or clean image', details: err.message });
   }
+});
+
+// global error handler (must come after all route definitions)
+app.use((err, req, res, next) => {
+  if (!err) return next();
+  // multer file size limit error
+  if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+    console.warn('⚠️ upload rejected - file too large:', err.message);
+    return res.status(413).json({
+      error: 'File too large',
+      maxBytes: MAX_PHOTO_BYTES,
+    });
+  }
+
+  // explicit CORS rejection is generated above; convert to 403 for clarity
+  if (err.message && err.message.includes('Not allowed by CORS')) {
+    return res.status(403).json({ error: 'CORS origin not permitted' });
+  }
+
+  console.error('❌ Unhandled error:', err);
+  res.status(500).json({ error: 'Server error', details: err.message });
 });
 
 // Start the server
