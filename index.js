@@ -33,9 +33,31 @@ const app = express()
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",").map(o => o.trim())
   : [
-      process.env.VITE_FRONTEND_URL || "http://localhost:5173",
-      "https://fibuca-frontend.vercel.app",
+      process.env.VITE_FRONTEND_URL || "https://fibuca-frontend.vercel.app",
     ];
+
+// Always ensure the official frontend host is present for quick verification/testing
+if (!allowedOrigins.includes('https://fibuca-frontend.vercel.app')) {
+  allowedOrigins.push('https://fibuca-frontend.vercel.app');
+}
+
+// Lightweight middleware to set basic CORS headers early (also handles OPTIONS)
+// This helps ensure browsers see Access-Control headers even for simple
+// errors that reach our server. Note: platform (Vercel) rejections before
+// this code runs (e.g. very large body rejected by the platform) still
+// won't include these headers.
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (!origin) return next();
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 
 // Attach CORS middleware globally.  This ensures headers are set on every
 // response, including error cases such as multer size limits or Vercel
@@ -61,6 +83,7 @@ const MAX_PHOTO_BYTES = parseInt(process.env.UPLOAD_SIZE_LIMIT || String(50 * 10
 
 console.log('🛡️ CORS allowed origins:', allowedOrigins);
 console.log('📦 upload size limit bytes:', MAX_PHOTO_BYTES);
+console.log('⚠️ Note: serverless platforms (Vercel) commonly enforce ~4.5MB request body limits; even with 50MB configured here, the platform may reject larger requests before this app runs.');
 
 // memory storage for uploads uses the limit variable now
 const uploadPDF = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES } });
