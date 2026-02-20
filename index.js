@@ -34,28 +34,22 @@ const allowedOrigins = [
   "http://localhost:3000",
 ];
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  
-  // Allow if origin is in whitelist, or allow all for development
-  const isDevelopment = process.env.NODE_ENV !== 'production';
-  const isAllowed = !origin || allowedOrigins.includes(origin) || isDevelopment;
-  
-  if (isAllowed) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Max-Age', '86400');
-  }
+const corsOptions = {
+  origin: function (origin, callback) {
+    // allow requests with no origin (like mobile apps, curl)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    console.warn('Blocked CORS request from', origin);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET','POST','PUT','DELETE','OPTIONS','PATCH'],
+  allowedHeaders: ['Content-Type','Authorization','X-Requested-With'],
+  credentials: true,
+  maxAge: 86400
+};
 
-  // Handle preflight
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
-  }
-
-  next();
-});
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 const prisma = new PrismaClient()
 const PORT = process.env.PORT
@@ -76,7 +70,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
 
 
 // ✅ Use memory storage for all uploads
-const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10MB (increased for PDF)
+const MAX_PHOTO_BYTES = 25 * 1024 * 1024; // 25MB (increased for larger PDFs)
 const uploadPDF = multer({ 
   storage: multer.memoryStorage(), 
   limits: { fileSize: MAX_PHOTO_BYTES },
