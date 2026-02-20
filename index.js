@@ -30,26 +30,26 @@ const app = express()
 // ---------- CORS Setup ----------
 const allowedOrigins = [
   process.env.VITE_FRONTEND_URL || "http://localhost:5173",
-  "https://fibuca-frontend.vercel.app",
-  "http://localhost:3000",
+  "https://fibuca-frontend.vercel.app"
 ];
 
-const corsOptions = {
-  origin: function (origin, callback) {
-    // allow requests with no origin (like mobile apps, curl)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    console.warn('Blocked CORS request from', origin);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  methods: ['GET','POST','PUT','DELETE','OPTIONS','PATCH'],
-  allowedHeaders: ['Content-Type','Authorization','X-Requested-With'],
-  credentials: true,
-  maxAge: 86400
-};
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  
+  if (!origin || allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
 
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+  // Handle preflight
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
 
 const prisma = new PrismaClient()
 const PORT = process.env.PORT
@@ -58,8 +58,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 
 
 // Parse JSON / URL-encoded requests
-app.use(express.json({ limit: '50mb' }))
-app.use(express.urlencoded({ extended: true, limit: '50mb' }))
+app.use(express.json())
+app.use(express.urlencoded({ extended: true }))
 app.use(cookieParser())
 
 // --------------------
@@ -70,47 +70,10 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
 
 
 // ✅ Use memory storage for all uploads
-const MAX_PHOTO_BYTES = 25 * 1024 * 1024; // 25MB (increased for larger PDFs)
-const uploadPDF = multer({ 
-  storage: multer.memoryStorage(), 
-  limits: { fileSize: MAX_PHOTO_BYTES },
-  timeout: 120000 
-});
-const uploadPhoto = multer({ 
-  storage: multer.memoryStorage(), 
-  limits: { fileSize: MAX_PHOTO_BYTES },
-  timeout: 120000 
-});
+const MAX_PHOTO_BYTES = 3 * 1024 * 1024; // 3MB
+const uploadPDF = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES } });
+const uploadPhoto = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES } });
 
-
-// ✅ REQUEST TIMEOUT HANDLER FOR MOBILE
-app.use((req, res, next) => {
-  // 120 seconds for file uploads, 60 seconds for others (increased for mobile)
-  const timeout = req.path.includes('/submit-form') || req.path.includes('/upload') ? 120000 : 60000;
-  req.setTimeout(timeout);
-  res.setTimeout(timeout);
-
-  req.on('timeout', () => {
-    console.warn(`⚠️ Request timeout on ${req.method} ${req.path}`);
-    if (!res.headersSent) {
-      res.status(408).json({ error: 'Request timeout. Please check your connection and try again.' });
-    }
-  });
-
-  next();
-});
-
-// ✅ HEALTH CHECK ENDPOINT FOR MOBILE CONNECTIVITY TESTING
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    backend: 'fibuca-backend',
-    cloudinary: {
-      configured: !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY)
-    }
-  });
-});
 
 // --------------------
 // Auth middleware
@@ -289,33 +252,47 @@ app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
 // ---------- POST /submit-form ----------
 app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
   try {
-    console.log("📥 /submit-form request received from:", req.headers.origin);
-    console.log("📦 File received:", req.file ? `${req.file.originalname} (${req.file.size} bytes)` : "No file");
-    console.log("📋 Form data:", req.body.data ? "Present" : "Missing");
-
     // 1️⃣ Parse form JSON from frontend
-    if (!req.body.data) {
-      return res.status(400).json({ error: "Missing form data" });
-    }
-    
     const form = JSON.parse(req.body.data);
-    
-    if (!req.file) {
-      return res.status(400).json({ error: "No PDF uploaded. Please ensure the PDF was generated correctly." });
+    if (!req.file) return res.status(400).json({ error: "No PDF uploaded" });
+
+    // Verify Cloudinary is configured
+    if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY) {
+      console.error('❌ Cloudinary not configured. Missing env vars:', {
+        CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
+        CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
+        CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
+      });
+      return res.status(500).json({ 
+        error: 'Server misconfigured: Cloudinary not set up. Contact admin.',
+        details: 'Missing Cloudinary environment variables'
+      });
     }
 
-// Verify Cloudinary is configured
-if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY) {
-  console.error('❌ Cloudinary not configured. Missing env vars:', {
-    CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
-    CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
-    CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
-  });
-  return res.status(500).json({ 
-    error: 'Server misconfigured: Cloudinary not set up. Contact admin.',
-    details: 'Missing Cloudinary environment variables'
-  });
-}
+    // ---------- GET /api/download/:id ----------
+// Allow ADMIN/SUPERADMIN to download a submission's PDF
+app.get('/api/download/:id', authenticate, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid submission ID' });
+
+    const submission = await prisma.submission.findUnique({ where: { id } });
+    if (!submission || !submission.pdfPath) {
+      return res.status(404).json({ error: 'No PDF found for this submission' });
+    }
+
+    // Role check: clients can only download their own
+    if (req.user.role === 'CLIENT' && req.user.employeeNumber !== submission.employeeNumber) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    // Redirect to Cloudinary secure URL
+    return res.redirect(submission.pdfPath);
+  } catch (err) {
+    console.error('❌ GET /api/download/:id failed:', err);
+    res.status(500).json({ error: 'Failed to download PDF' });
+  }
+});
 
 
     // 2️⃣ Prepare Cloudinary upload stream
@@ -425,31 +402,6 @@ if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY) {
   } catch (err) {
     console.error("❌ Submission error:", err);
     res.status(500).json({ error: "Failed to submit form", details: err.message });
-  }
-});
-
-// ---------- GET /api/download/:id ----------
-// Allow ADMIN/SUPERADMIN to download a submission's PDF
-app.get('/api/download/:id', authenticate, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (isNaN(id)) return res.status(400).json({ error: 'Invalid submission ID' });
-
-    const submission = await prisma.submission.findUnique({ where: { id } });
-    if (!submission || !submission.pdfPath) {
-      return res.status(404).json({ error: 'No PDF found for this submission' });
-    }
-
-    // Role check: clients can only download their own
-    if (req.user.role === 'CLIENT' && req.user.employeeNumber !== submission.employeeNumber) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-
-    // Redirect to Cloudinary secure URL
-    return res.redirect(submission.pdfPath);
-  } catch (err) {
-    console.error('❌ GET /api/download/:id failed:', err);
-    res.status(500).json({ error: 'Failed to download PDF' });
   }
 });
 
