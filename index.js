@@ -57,7 +57,7 @@ app.use(
 );
 
 // parse upload size limit from environment or default to 3MB
-const MAX_PHOTO_BYTES = parseInt(process.env.UPLOAD_SIZE_LIMIT || String(3 * 1024 * 1024), 10);
+const MAX_PHOTO_BYTES = parseInt(process.env.UPLOAD_SIZE_LIMIT || String(50 * 1024 * 1024), 10);
 
 console.log('🛡️ CORS allowed origins:', allowedOrigins);
 console.log('📦 upload size limit bytes:', MAX_PHOTO_BYTES);
