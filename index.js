@@ -33,8 +33,8 @@ const app = express()
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",").map(o => o.trim())
   : [
-      process.env.VITE_FRONTEND_URL || "https://fibuca-frontend.vercel.app",
-    ];
+    process.env.VITE_FRONTEND_URL || "https://fibuca-frontend.vercel.app",
+  ];
 
 // Always ensure the official frontend host is present for quick verification/testing
 if (!allowedOrigins.includes('https://fibuca-frontend.vercel.app')) {
@@ -304,36 +304,36 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
         CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
         CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
       });
-      return res.status(500).json({ 
+      return res.status(500).json({
         error: 'Server misconfigured: Cloudinary not set up. Contact admin.',
         details: 'Missing Cloudinary environment variables'
       });
     }
 
     // ---------- GET /api/download/:id ----------
-// Allow ADMIN/SUPERADMIN to download a submission's PDF
-app.get('/api/download/:id', authenticate, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (isNaN(id)) return res.status(400).json({ error: 'Invalid submission ID' });
+    // Allow ADMIN/SUPERADMIN to download a submission's PDF
+    app.get('/api/download/:id', authenticate, async (req, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) return res.status(400).json({ error: 'Invalid submission ID' });
 
-    const submission = await prisma.submission.findUnique({ where: { id } });
-    if (!submission || !submission.pdfPath) {
-      return res.status(404).json({ error: 'No PDF found for this submission' });
-    }
+        const submission = await prisma.submission.findUnique({ where: { id } });
+        if (!submission || !submission.pdfPath) {
+          return res.status(404).json({ error: 'No PDF found for this submission' });
+        }
 
-    // Role check: clients can only download their own
-    if (req.user.role === 'CLIENT' && req.user.employeeNumber !== submission.employeeNumber) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
+        // Role check: clients can only download their own
+        if (req.user.role === 'CLIENT' && req.user.employeeNumber !== submission.employeeNumber) {
+          return res.status(403).json({ error: 'Forbidden' });
+        }
 
-    // Redirect to Cloudinary secure URL
-    return res.redirect(submission.pdfPath);
-  } catch (err) {
-    console.error('❌ GET /api/download/:id failed:', err);
-    res.status(500).json({ error: 'Failed to download PDF' });
-  }
-});
+        // Redirect to Cloudinary secure URL
+        return res.redirect(submission.pdfPath);
+      } catch (err) {
+        console.error('❌ GET /api/download/:id failed:', err);
+        res.status(500).json({ error: 'Failed to download PDF' });
+      }
+    });
 
 
     // 2️⃣ Prepare Cloudinary upload stream
@@ -807,32 +807,56 @@ app.put('/api/admin/users/:id', /* requireAuth, requireRole(['ADMIN','SUPERADMIN
     res.status(500).json({ error: 'Failed to update user' })
   }
 })
-
 // ——————————————————————————
 // DELETE /api/admin/users/:id
-// Delete a user by ID
+// Delete a user by ID (supports cascade or soft delete)
 app.delete('/api/admin/users/:id', /* requireAuth, requireRole(['ADMIN','SUPERADMIN']), */ async (req, res) => {
-  const { id } = req.params
+  const id = Number(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid user ID' });
 
   try {
     const existing = await prisma.user.findUnique({
-      where: { id: Number(id) }
-    })
+      where: { id },
+      include: {
+        idCards: true,
+        submissions: true
+      }
+    });
+
     if (!existing) {
-      return res.status(404).json({ error: 'User not found' })
+      return res.status(404).json({ error: 'User not found' });
     }
 
+    // Optional soft delete: uncomment if using deletedAt
+    /*
+    await prisma.user.update({
+      where: { id },
+      data: { deletedAt: new Date() }
+    });
+    return res.json({ message: 'User soft-deleted successfully', id });
+    */
+
+    // Hard delete (with cascade on IdCards & Submissions if schema is updated)
     await prisma.user.delete({
-      where: { id: Number(id) }
-    })
+      where: { id }
+    });
 
-    res.json({ message: 'User deleted successfully', id: Number(id) })
+    console.log(`✅ User ${id} deleted. Cascade removed ${existing.idCards.length} idCards and ${existing.submissions.length} submissions.`);
+
+    res.json({ message: 'User deleted successfully', id });
   } catch (err) {
-    console.error(`❌ DELETE /api/admin/users/${id} error:`, err)
-    res.status(500).json({ error: 'Failed to delete user' })
-  }
-})
+    console.error(`❌ DELETE /api/admin/users/${id} error:`, err);
 
+    // Detect FK error (for safety if cascade is missing)
+    if (err.code === 'P2003') {
+      return res.status(409).json({
+        error: 'Cannot delete user: dependent records exist. Enable cascade deletes or use soft delete.'
+      });
+    }
+
+    res.status(500).json({ error: 'Failed to delete user', details: err.message });
+  }
+});
 // ——————————————————————————
 // Submissions endpoints (used by frontend at '/submissions')
 // GET /submissions -> ADMIN: all submissions; CLIENT: their own submissions
