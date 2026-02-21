@@ -1,40 +1,48 @@
-// prisma/schema.prisma
-generator client {
-  provider = "prisma-client-js"
-}
-
-
-datasource db {
-  provider = "postgresql"
-  url      = env("PRISMA_DATABASE_URL2_DATABASE_URL")
-}
-
-
-// ✅ Step 1: Prisma Schema (prisma/schema.prisma)
-// Run: npx prisma migrate dev --name init
-
 model User {
-  id             Int      @id @default(autoincrement())
+  id             Int       @id @default(autoincrement())
   name           String
-  username       String   @unique
+  username       String    @unique
   email          String?
   password       String
-  employeeNumber String   @unique
-  role           Role     @default(CLIENT)
-  firstLogin     Boolean  @default(true)
-  createdAt      DateTime @default(now())
-  idCards        IdCard[] // <-- Add this line
+  employeeNumber String    @unique
+  role           Role      @default(CLIENT)
+  firstLogin     Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  deletedAt      DateTime? // soft delete
+
+  idCards        IdCard[]
+  submissions    Submission[]
 }
 
 model Submission {
   id             Int      @id @default(autoincrement())
   employeeName   String
-  employeeNumber String   @unique
+  employeeNumber String
+  pdfPath        String
   employerName   String
   dues           String
   witness        String
-  pdfPath        String
   submittedAt    DateTime @default(now())
+
+  userId Int?
+  user   User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model IdCard {
+  id            Int      @id @default(autoincrement())
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId        Int
+  fullName      String
+  rawPhotoUrl   String?
+  cleanPhotoUrl String?
+  company       String
+  role          String
+  issuedAt      DateTime @default(now())
+  cardNumber    String   @unique
+
+  @@index([userId])
 }
 
 enum Role {
@@ -42,17 +50,3 @@ enum Role {
   ADMIN
   SUPERADMIN
 }
-
-model IdCard {
-  id            Int      @id @default(autoincrement())
-  user          User     @relation(fields: [userId], references: [id])
-  userId        Int
-  fullName      String
-  rawPhotoUrl   String?  // original upload (untouched)
-  cleanPhotoUrl String?  // cleaned by rembg
-  company       String
-  role          String
-  issuedAt      DateTime @default(now())
-  cardNumber    String   @unique
-}
-
