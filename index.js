@@ -7,6 +7,7 @@ const fs = require('fs')
 const path = require('path')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcrypt')
+const IS_VERCEL = !!process.env.VERCEL;
 const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
 const streamifier = require('streamifier') // ✅ const import style
@@ -512,40 +513,74 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
   }
 });
 
-// ---------- POST /api/idcards (create new card) ----------
-app.post('/api/idcards', authenticate, async (req, res) => {
+
+// ---------- POST /api/idcards (create new card with optional photo) ----------
+app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   try {
     const { userId, fullName, company, role, cardNumber } = req.body;
     if (!userId || !fullName || !company || !role || !cardNumber) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    const card = await prisma.idCard.create({
+    // Create the card first
+    let card = await prisma.idCard.create({
       data: {
         userId: parseInt(userId),
         fullName,
         company,
         role,
         cardNumber,
-        photoUrl: '',
-        // photoStatus is no longer needed with synchronous Uploadcare processing
+        rawPhotoUrl: '',
+        cleanPhotoUrl: '',
       }
     });
+
+    // If a photo file is uploaded, process it immediately
+    if (req.file && req.file.buffer) {
+      const photosDir = path.join(__dirname, 'photos');
+      if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
+
+      const ext = path.extname(req.file.originalname) || '.png';
+      const rawFilename = `idcard_${card.id}_raw_${Date.now()}${ext}`;
+      const rawPath = path.join(photosDir, rawFilename);
+      fs.writeFileSync(rawPath, req.file.buffer);
+
+      let cleanedBuffer;
+      try {
+        cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
+      } catch (pyErr) {
+        console.warn('[idcard/photo] Background removal failed during creation:', pyErr.message);
+      }
+
+      let cleanUrl = '';
+      if (cleanedBuffer) {
+        const cleanFilename = `idcard_${card.id}_clean_${Date.now()}.png`;
+        const cleanPath = path.join(photosDir, cleanFilename);
+        fs.writeFileSync(cleanPath, cleanedBuffer);
+        cleanUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
+      }
+
+      const rawUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${rawFilename}`;
+
+      // Update card with photo URLs
+      card = await prisma.idCard.update({
+        where: { id: card.id },
+        data: { rawPhotoUrl: rawUrl, cleanPhotoUrl: cleanUrl },
+      });
+    }
 
     res.status(201).json({ message: 'ID card created', card });
   } catch (err) {
     console.error('❌ POST /api/idcards error:', err);
-    res.status(500).json({ error: 'Failed to create ID card' });
+    res.status(500).json({ error: 'Failed to create ID card', details: err.message });
   }
 });
-
 /**
  * ✅ PUT /api/idcards/:id/photo
  * Upload a raw ID card photo, run Python rembg to remove background, and save both
 * raw and cleaned images to the local `photos/` folder.  Updates DB with local URLs.
 */
-
-// new endpoint: upload raw image and clean locally
+// ---------- PUT /api/idcards/:id/photo ----------
 app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -553,14 +588,14 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
 
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
-    if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
+    if (req.user.role === 'CLIENT' && req.user.id !== card.userId) 
       return res.status(403).json({ error: 'Forbidden' });
 
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({ error: 'No photo file uploaded' });
     }
 
-    // ensure photos directory exists
+    // Ensure photos directory exists for VPS/local storage
     const photosDir = path.join(__dirname, 'photos');
     if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
 
@@ -573,7 +608,7 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
     try {
       cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
     } catch (pyErr) {
-      console.warn('[idcard/photo] Python rembg failed, proceeding without clean image:', pyErr.message);
+      console.warn('[idcard/photo] Background removal failed:', pyErr.message);
     }
 
     let cleanUrl = '';
@@ -588,25 +623,17 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
-      data: {
-        rawPhotoUrl: rawUrl,
-        cleanPhotoUrl: cleanUrl,
-      },
+      data: { rawPhotoUrl: rawUrl, cleanPhotoUrl: cleanUrl },
     });
 
-    res.json({ message: '✅ Photo uploaded and processed locally', card: updatedCard });
+    res.json({ message: '✅ Photo uploaded and processed', card: updatedCard });
   } catch (err) {
     console.error('❌ PUT /api/idcards/:id/photo failed:', err);
-    res.status(500).json({ error: 'Failed to save photo', details: err.message });
+    res.status(500).json({ error: 'Failed to upload photo', details: err.message });
   }
 });
 
-/**
- * ✅ PUT /api/idcards/:id/clean-photo
- * Re-run Python rembg on the existing raw photo and overwrite the clean image
- * (useful if the backend Python script or parameters change).  Works with
- * locally stored photos or remote URLs.
- */
+// ---------- PUT /api/idcards/:id/clean-photo ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -614,11 +641,8 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
 
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
+    if (!card.rawPhotoUrl) return res.status(400).json({ error: 'No raw photo to clean' });
 
-    if (!card.rawPhotoUrl)
-      return res.status(400).json({ error: 'No raw photo URL found to clean' });
-
-    // fetch raw bytes (either local file or remote URL)
     let buf;
     if (/^https?:\/\//.test(card.rawPhotoUrl)) {
       const resp = await axios.get(card.rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
@@ -629,9 +653,11 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     }
 
     const cleaned = await removeBackgroundBuffer(buf);
+
     const cleanFilename = `idcard_${id}_clean_${Date.now()}.png`;
     const cleanPath = path.join(__dirname, 'photos', cleanFilename);
     fs.writeFileSync(cleanPath, cleaned);
+
     const cleanPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
 
     const updatedCard = await prisma.idCard.update({
@@ -639,35 +665,29 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
       data: { cleanPhotoUrl },
     });
 
-    res.json({
-      message: '✅ Photo re-cleaned using Cloudinary background removal.',
-      card: updatedCard,
-    });
+    res.json({ message: '✅ Photo re-cleaned', card: updatedCard });
   } catch (err) {
     console.error('❌ PUT /api/idcards/:id/clean-photo failed:', err);
-    res.status(500).json({ error: 'Failed to clean photo', details: err.message });
+    res.status(500).json({ error: 'Failed to re-clean photo', details: err.message });
   }
 });
 
 // ---------- DELETE /api/idcards/:id ----------
 app.delete('/api/idcards/:id', authenticate, async (req, res) => {
-  const id = parseInt(req.params.id);
-  if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
-
   try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
+
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
-
-    if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
+    if (req.user.role === 'CLIENT' && req.user.id !== card.userId) 
       return res.status(403).json({ error: 'Forbidden' });
-    }
 
     await prisma.idCard.delete({ where: { id } });
-
-    res.json({ message: 'ID card deleted' });
+    res.json({ message: '✅ ID card deleted' });
   } catch (err) {
     console.error('❌ DELETE /api/idcards/:id failed:', err);
-    res.status(500).json({ error: 'Failed to delete ID card' });
+    res.status(500).json({ error: 'Failed to delete ID card', details: err.message });
   }
 });
 
