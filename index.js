@@ -554,57 +554,8 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
  * Upload a raw ID card photo, run Python rembg to remove background, and save both
 * raw and cleaned images to the local `photos/` folder.  Updates DB with local URLs.
 */
-app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
 
-    const card = await prisma.idCard.findUnique({ where: { id } });
-    if (!card) return res.status(404).json({ error: 'ID card not found' });
-    if (req.user.role === 'CLIENT' && req.user.id !== card.userId) 
-      return res.status(403).json({ error: 'Forbidden' });
-
-    if (!req.file || !req.file.buffer) {
-      return res.status(400).json({ error: 'No photo file uploaded' });
-    }
-
-    // continue with writing file to /tmp/photos, etc.
-    const photosDir = path.join('/tmp', 'photos'); // ✅ serverless-friendly
-    if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
-
-    const ext = path.extname(req.file.originalname) || '.png';
-    const rawFilename = `idcard_${id}_raw_${Date.now()}${ext}`;
-    const rawPath = path.join(photosDir, rawFilename);
-    fs.writeFileSync(rawPath, req.file.buffer);
-
-    let cleanedBuffer;
-    try {
-      cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
-    } catch (err) {
-      console.warn('[idcard/photo] Background removal failed:', err.message);
-    }
-
-    let cleanUrl = '';
-    if (cleanedBuffer) {
-      const cleanFilename = `idcard_${id}_clean_${Date.now()}.png`;
-      const cleanPath = path.join(photosDir, cleanFilename);
-      fs.writeFileSync(cleanPath, cleanedBuffer);
-      cleanUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
-    }
-
-    const rawUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${rawFilename}`;
-
-    const updatedCard = await prisma.idCard.update({
-      where: { id },
-      data: { rawPhotoUrl: rawUrl, cleanPhotoUrl: cleanUrl },
-    });
-
-    res.json({ message: '✅ Photo uploaded and processed', card: updatedCard });
-  } catch (err) {
-    console.error('❌ PUT /api/idcards/:id/photo failed:', err);
-    res.status(500).json({ error: 'Failed to upload photo', details: err.message });
-  }
-});
+app.put('/api/idcards/:id/photo
 
 // ---------- PUT /api/idcards/:id/clean-photo ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
