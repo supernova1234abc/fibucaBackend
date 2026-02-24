@@ -290,6 +290,7 @@ app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch submission' });
   }
 });
+
 // ---------- POST /submit-form ----------
 app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
   try {
@@ -419,7 +420,6 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
     res.status(500).json({ error: "Failed to submit form", details: err.message });
   }
 });
-
 /**
  * ✅ POST /bulk-upload
  * Receives an array of user records from Excel and saves them
