@@ -925,11 +925,14 @@ app.delete('/submissions/:id', authenticate, async (req, res) => {
  */
 app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
-    if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
+    const isVercel = !!process.env.VERCEL;
+    const id = Number(req.params.id);
+
+    if (!id) return res.status(400).json({ error: 'Invalid ID' });
+    if (!req.body || !req.body.rawPhotoUrl)
+      return res.status(400).json({ error: 'Missing rawPhotoUrl' });
 
     const { rawPhotoUrl } = req.body;
-    if (!rawPhotoUrl) return res.status(400).json({ error: 'Missing rawPhotoUrl' });
 
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
@@ -937,42 +940,100 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
     if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
       return res.status(403).json({ error: 'Forbidden' });
 
-    console.log(`[fetch-and-clean] fetching image from: ${rawPhotoUrl}`);
+    console.log(`[ENV: ${isVercel ? "VERCEL" : "VPS"}] Fetching image...`);
 
-    // 1) Fetch image bytes from rawPhotoUrl
-    const resp = await axios.get(rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
-    let buf = Buffer.from(resp.data);
-    console.log(`[fetch-and-clean] downloaded ${buf.length} bytes`);
-
-    // 2) Apply optimized Python background removal (streaming/chunked processing)
-    let cleanedBuffer;
-    try {
-      console.log('[fetch-and-clean] Applying optimized Python rembg...');
-      cleanedBuffer = await removeBackgroundBuffer(buf);
-      console.log(`[fetch-and-clean] ✅ Python processing complete: ${cleanedBuffer.length} bytes`);
-      buf = null; // Free memory after processing
-    } catch (pythonErr) {
-      console.warn('[fetch-and-clean] ⚠️ Python processing failed, using original image:', pythonErr.message);
-      cleanedBuffer = Buffer.from(resp.data); // Use original if Python fails
-    }
-
-    // 3) save cleaned buffer locally in photos directory
-    const photosDir = path.join(__dirname, 'photos');
-    if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
-    const cleanFilename = `idcard_fetched_${id}_${Date.now()}.png`;
-    const cleanPath = path.join(photosDir, cleanFilename);
-    fs.writeFileSync(cleanPath, cleanedBuffer);
-    const cleanUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
-
-    const updatedCard = await prisma.idCard.update({
-      where: { id },
-      data: { cleanPhotoUrl: cleanUrl, rawPhotoUrl: rawPhotoUrl },
+    // 1️⃣ Download image
+    const response = await axios.get(rawPhotoUrl, {
+      responseType: 'arraybuffer',
+      timeout: 20000
     });
 
-    res.json({ message: '✅ Fetched, cleaned with Python rembg, and saved locally', card: updatedCard });
+    const originalBuffer = Buffer.from(response.data);
+
+    let finalBuffer = originalBuffer;
+
+    // 2️⃣ If NOT Vercel → use Python
+    if (!isVercel) {
+      try {
+        console.log("Running Python background removal...");
+        finalBuffer = await removeBackgroundBuffer(originalBuffer);
+        console.log("✅ Python success");
+      } catch (err) {
+        console.warn("⚠️ Python failed, using original image");
+      }
+    }
+
+    let cleanUrl;
+
+    // ==========================
+    // 🚀 VPS MODE
+    // ==========================
+    if (!isVercel) {
+
+      const photosDir = path.join(__dirname, 'photos');
+      await fs.promises.mkdir(photosDir, { recursive: true });
+
+      const filename = `idcard_${id}_${Date.now()}.png`;
+      const filePath = path.join(photosDir, filename);
+
+      await fs.promises.writeFile(filePath, finalBuffer);
+
+      const baseUrl = process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
+      cleanUrl = `${baseUrl}/photos/${filename}`;
+    }
+
+    // ==========================
+    // ☁️ VERCEL MODE
+    // ==========================
+    if (isVercel) {
+
+      const uploadResult = await cloudinary.uploader.upload_stream(
+        { folder: "idcards_cleaned" },
+        async (error, result) => {
+          if (error) throw error;
+          cleanUrl = result.secure_url;
+
+          const updatedCard = await prisma.idCard.update({
+            where: { id },
+            data: {
+              cleanPhotoUrl: cleanUrl,
+              rawPhotoUrl
+            }
+          });
+
+          return res.json({
+            message: "✅ Image processed (Cloudinary)",
+            card: updatedCard
+          });
+        }
+      );
+
+      uploadResult.end(finalBuffer);
+      return; // prevent double response
+    }
+
+    // ==========================
+    // Update DB (VPS)
+    // ==========================
+    const updatedCard = await prisma.idCard.update({
+      where: { id },
+      data: {
+        cleanPhotoUrl: cleanUrl,
+        rawPhotoUrl
+      }
+    });
+
+    return res.json({
+      message: "✅ Image processed (VPS)",
+      card: updatedCard
+    });
+
   } catch (err) {
-    console.error('❌ fetch-and-clean failed:', err);
-    res.status(500).json({ error: 'Failed to fetch or clean image', details: err.message });
+    console.error("❌ fetch-and-clean failed:", err);
+    return res.status(500).json({
+      error: "Failed to fetch or clean image",
+      details: err.message
+    });
   }
 });
 
