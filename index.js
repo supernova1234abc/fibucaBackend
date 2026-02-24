@@ -568,6 +568,7 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
       return res.status(400).json({ error: 'No photo file uploaded' });
     }
 
+    // continue with writing file to /tmp/photos, etc.
     const photosDir = path.join('/tmp', 'photos'); // ✅ serverless-friendly
     if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
 
