@@ -290,7 +290,6 @@ app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch submission' });
   }
 });
-
 // ---------- POST /submit-form ----------
 app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
   try {
@@ -311,42 +310,16 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       });
     }
 
-    // ---------- GET /api/download/:id ----------
-    // Allow ADMIN/SUPERADMIN to download a submission's PDF
-    app.get('/api/download/:id', authenticate, async (req, res) => {
-      try {
-        const id = Number(req.params.id);
-        if (isNaN(id)) return res.status(400).json({ error: 'Invalid submission ID' });
-
-        const submission = await prisma.submission.findUnique({ where: { id } });
-        if (!submission || !submission.pdfPath) {
-          return res.status(404).json({ error: 'No PDF found for this submission' });
-        }
-
-        // Role check: clients can only download their own
-        if (req.user.role === 'CLIENT' && req.user.employeeNumber !== submission.employeeNumber) {
-          return res.status(403).json({ error: 'Forbidden' });
-        }
-
-        // Redirect to Cloudinary secure URL
-        return res.redirect(submission.pdfPath);
-      } catch (err) {
-        console.error('❌ GET /api/download/:id failed:', err);
-        res.status(500).json({ error: 'Failed to download PDF' });
-      }
-    });
-
-
-    // 2️⃣ Prepare Cloudinary upload stream
+    // ---------- 2️⃣ Prepare Cloudinary upload ----------
     const publicId = `form_${form.employeeNumber}_${Date.now()}`;
     const uploadStream = () =>
       new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
           {
-            resource_type: 'raw',    // PDF or doc file
-            folder: 'fibuca/forms',  // Cloudinary folder
+            resource_type: 'raw',    
+            folder: 'fibuca/forms',  
             public_id: publicId,
-            format: 'pdf',            // ensures .pdf extension
+            format: 'pdf',
           },
           (error, result) => (error ? reject(error) : resolve(result))
         );
@@ -357,18 +330,18 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
     const uploadResult = await uploadStream();
     const pdfUrl = uploadResult.secure_url;
 
-    // 4️⃣ Upsert submission record in database
-    const submission = await prisma.submission.upsert({
+    // 4️⃣ Check for existing submission
+    const existingSubmission = await prisma.submission.findUnique({
       where: { employeeNumber: form.employeeNumber },
-      update: {
-        employeeName: form.employeeName,
-        employerName: form.employerName,
-        dues: form.dues,
-        witness: form.witness,
-        pdfPath: pdfUrl,
-        submittedAt: new Date(),
-      },
-      create: {
+    });
+
+    if (existingSubmission) {
+      return res.status(409).json({ error: 'Submission already exists for this employee number' });
+    }
+
+    // 5️⃣ Create new submission
+    const submission = await prisma.submission.create({
+      data: {
         employeeName: form.employeeName,
         employeeNumber: form.employeeNumber,
         employerName: form.employerName,
@@ -379,7 +352,7 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       },
     });
 
-    // 5️⃣ Check if user exists, else create
+    // 6️⃣ Check if user exists, else create
     let user = await prisma.user.findUnique({ where: { username: form.employeeNumber } });
     let tempPassword = null;
 
@@ -400,7 +373,7 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       });
     }
 
-    // 6️⃣ Generate placeholder ID card if not exists
+    // 7️⃣ Generate placeholder ID card if not exists
     const makeCardNumber = () => {
       const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
       const prefix = Array.from({ length: 2 })
@@ -416,7 +389,7 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
         data: {
           userId: user.id,
           fullName: user.name,
-          rawPhotoUrl: "", // can be filled later after photo upload
+          rawPhotoUrl: "",
           cleanPhotoUrl: "",
           company: submission.employerName,
           role: "Member",
@@ -426,7 +399,7 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
       });
     }
 
-    // 7️⃣ Respond to frontend
+    // 8️⃣ Respond to frontend
     res.status(200).json({
       message: "✅ Form submitted successfully",
       submission,
@@ -575,12 +548,12 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
     res.status(500).json({ error: 'Failed to create ID card', details: err.message });
   }
 });
+
 /**
  * ✅ PUT /api/idcards/:id/photo
  * Upload a raw ID card photo, run Python rembg to remove background, and save both
 * raw and cleaned images to the local `photos/` folder.  Updates DB with local URLs.
 */
-// ---------- PUT /api/idcards/:id/photo ----------
 app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -595,8 +568,7 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
       return res.status(400).json({ error: 'No photo file uploaded' });
     }
 
-    // Ensure photos directory exists for VPS/local storage
-    const photosDir = path.join(__dirname, 'photos');
+    const photosDir = path.join('/tmp', 'photos'); // ✅ serverless-friendly
     if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
 
     const ext = path.extname(req.file.originalname) || '.png';
@@ -607,8 +579,8 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
     let cleanedBuffer;
     try {
       cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
-    } catch (pyErr) {
-      console.warn('[idcard/photo] Background removal failed:', pyErr.message);
+    } catch (err) {
+      console.warn('[idcard/photo] Background removal failed:', err.message);
     }
 
     let cleanUrl = '';
