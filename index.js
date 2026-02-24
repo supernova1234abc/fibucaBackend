@@ -554,8 +554,109 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
  * Upload a raw ID card photo, run Python rembg to remove background, and save both
 * raw and cleaned images to the local `photos/` folder.  Updates DB with local URLs.
 */
+app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
 
-app.put('/api/idcards/:id/photo
+    const card = await prisma.idCard.findUnique({ where: { id } });
+    if (!card) return res.status(404).json({ error: 'ID card not found' });
+    if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
+      return res.status(403).json({ error: 'Forbidden' });
+
+    if (!req.file || !req.file.buffer)
+      return res.status(400).json({ error: 'No photo uploaded' });
+
+    const isVercel = !!process.env.VERCEL;
+    const fileExt = path.extname(req.file.originalname) || '.png';
+
+    let rawPhotoUrl = '';
+    let cleanPhotoUrl = '';
+
+    // -----------------------------
+    // 1️⃣ Save locally (VPS only)
+    // -----------------------------
+    if (!isVercel) {
+      const photosDir = path.join(__dirname, 'photos');
+      if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
+
+      const rawFilename = `idcard_${id}_raw_${Date.now()}${fileExt}`;
+      const rawPath = path.join(photosDir, rawFilename);
+      fs.writeFileSync(rawPath, req.file.buffer);
+
+      rawPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${rawFilename}`;
+
+      // Optional background removal
+      try {
+        const cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
+        const cleanFilename = `idcard_${id}_clean_${Date.now()}.png`;
+        const cleanPath = path.join(photosDir, cleanFilename);
+        fs.writeFileSync(cleanPath, cleanedBuffer);
+
+        cleanPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
+      } catch (err) {
+        console.warn('Background removal failed:', err.message);
+      }
+    }
+
+    // -----------------------------
+    // 2️⃣ Upload to Cloudinary
+    // -----------------------------
+    try {
+      // Raw photo
+      const rawUpload = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'fibuca/idcards/raw',
+            resource_type: 'image',
+          },
+          (error, result) => (error ? reject(error) : resolve(result))
+        );
+        streamifier.createReadStream(req.file.buffer).pipe(stream);
+      });
+      rawPhotoUrl = rawUpload.secure_url;
+
+      // Optional cleaned version
+      let bufferToClean = req.file.buffer;
+      if (!isVercel && cleanPhotoUrl) {
+        bufferToClean = fs.readFileSync(path.join(__dirname, 'photos', path.basename(cleanPhotoUrl)));
+      }
+
+      const cleanUpload = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'fibuca/idcards/clean',
+            resource_type: 'image',
+            format: 'png',
+          },
+          (error, result) => (error ? reject(error) : resolve(result))
+        );
+        streamifier.createReadStream(bufferToClean).pipe(stream);
+      });
+
+      cleanPhotoUrl = cleanUpload.secure_url;
+    } catch (err) {
+      console.warn('Cloudinary upload failed:', err.message);
+    }
+
+    // -----------------------------
+    // 3️⃣ Update DB
+    // -----------------------------
+    const updatedCard = await prisma.idCard.update({
+      where: { id },
+      data: { rawPhotoUrl, cleanPhotoUrl },
+    });
+
+    res.json({
+      message: '✅ Photo uploaded (local & Cloudinary)',
+      card: updatedCard,
+    });
+
+  } catch (err) {
+    console.error('❌ /idcards/:id/photo failed:', err);
+    res.status(500).json({ error: 'Failed to upload photo', details: err.message });
+  }
+});
 
 // ---------- PUT /api/idcards/:id/clean-photo ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
