@@ -707,7 +707,6 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
   }
 });
 
-// ---------- PUT /api/idcards/:id/clean-photo ----------
 app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -717,35 +716,77 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     if (!card) return res.status(404).json({ error: 'ID card not found' });
     if (!card.rawPhotoUrl) return res.status(400).json({ error: 'No raw photo to clean' });
 
-    let buf;
-    if (/^https?:\/\//.test(card.rawPhotoUrl)) {
-      const resp = await axios.get(card.rawPhotoUrl, { responseType: 'arraybuffer', timeout: 20000 });
-      buf = Buffer.from(resp.data);
-    } else {
-      const fname = path.basename(card.rawPhotoUrl);
-      buf = fs.readFileSync(path.join(__dirname, 'photos', fname));
+    let cleanPhotoUrl = '';
+
+    // ============================
+    // ☁️ CLOUDINARY MODE
+    // ============================
+    if (PHOTO_MODE === "cloudinary") {
+      console.log("☁️ Re-clean using Cloudinary AI");
+
+      // Extract public_id from URL
+      const parts = card.rawPhotoUrl.split('/');
+      const publicIdWithExt = parts.slice(-2).join('/'); 
+      const publicId = publicIdWithExt.replace(/\.[^/.]+$/, "");
+
+      cleanPhotoUrl = cloudinary.url(publicId, {
+        transformation: [
+          { effect: "background_removal" },
+          { background: "white" },
+          { crop: "pad" }
+        ]
+      });
     }
 
-    const cleaned = await removeBackgroundBuffer(buf);
+    // ============================
+    // 🖥 VPS MODE
+    // ============================
+    if (PHOTO_MODE === "vps") {
+      console.log("🖥 Re-clean using Python rembg");
 
-    const cleanFilename = `idcard_${id}_clean_${Date.now()}.png`;
-    const cleanPath = path.join(__dirname, 'photos', cleanFilename);
-    fs.writeFileSync(cleanPath, cleaned);
+      let buf;
 
-    const cleanPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
+      if (/^https?:\/\//.test(card.rawPhotoUrl)) {
+        const resp = await axios.get(card.rawPhotoUrl, {
+          responseType: 'arraybuffer',
+          timeout: 20000
+        });
+        buf = Buffer.from(resp.data);
+      } else {
+        const fname = path.basename(card.rawPhotoUrl);
+        buf = fs.readFileSync(path.join(__dirname, 'photos', fname));
+      }
+
+      const cleaned = await removeBackgroundBuffer(buf);
+
+      const photosDir = path.join(__dirname, 'photos');
+      if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
+
+      const cleanFilename = `idcard_${id}_clean_${Date.now()}.png`;
+      const cleanPath = path.join(photosDir, cleanFilename);
+      fs.writeFileSync(cleanPath, cleaned);
+
+      cleanPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
+    }
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
       data: { cleanPhotoUrl },
     });
 
-    res.json({ message: '✅ Photo re-cleaned', card: updatedCard });
+    res.json({
+      message: `✅ Photo re-cleaned using ${PHOTO_MODE}`,
+      card: updatedCard
+    });
+
   } catch (err) {
     console.error('❌ PUT /api/idcards/:id/clean-photo failed:', err);
-    res.status(500).json({ error: 'Failed to re-clean photo', details: err.message });
+    res.status(500).json({
+      error: 'Failed to re-clean photo',
+      details: err.message
+    });
   }
 });
-
 // ---------- DELETE /api/idcards/:id ----------
 app.delete('/api/idcards/:id', authenticate, async (req, res) => {
   try {
