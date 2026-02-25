@@ -591,6 +591,7 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch ID cards' });
   }
 });
+
 app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   try {
     const { userId, fullName, company, role, cardNumber } = req.body;
@@ -599,7 +600,7 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // 1️⃣ Create card first (without photo)
+    // Create card first (without photo)
     let card = await prisma.idCard.create({
       data: {
         userId: parseInt(userId),
@@ -615,42 +616,7 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
     let rawPhotoUrl = '';
     let cleanPhotoUrl = '';
 
-    // 2️⃣ If photo uploaded → process
     if (req.file && req.file.buffer) {
-
-      // ====================================================
-      // 🖥 VPS MODE
-      // ====================================================
-      if (PHOTO_MODE === "vps") {
-        console.log("🖥 POST using VPS mode");
-
-        const photosDir = path.join(__dirname, 'photos');
-        if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
-
-        const ext = path.extname(req.file.originalname) || '.png';
-
-        // Save RAW
-        const rawFilename = `idcard_${card.id}_raw_${Date.now()}${ext}`;
-        const rawPath = path.join(photosDir, rawFilename);
-        fs.writeFileSync(rawPath, req.file.buffer);
-
-        rawPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${rawFilename}`;
-
-        // Python background removal
-        try {
-          const cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
-
-          const cleanFilename = `idcard_${card.id}_clean_${Date.now()}.png`;
-          const cleanPath = path.join(photosDir, cleanFilename);
-          fs.writeFileSync(cleanPath, cleanedBuffer);
-
-          cleanPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
-
-        } catch (pyErr) {
-          console.warn("⚠️ Python cleaning failed:", pyErr.message);
-          cleanPhotoUrl = rawPhotoUrl;
-        }
-      }
 
       // ====================================================
       // ☁️ CLOUDINARY MODE
@@ -671,9 +637,7 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
 
         rawPhotoUrl = uploadResult.secure_url;
 
-        // AI background removal transformation – we can re‑use the public_id
-        // returned by the upload so the cleaned version always points at the
-        // same asset but with a transformation applied.
+        // AI background removal transformation
         cleanPhotoUrl = cloudinary.url(uploadResult.public_id, {
           transformation: [
             { effect: "background_removal" },
@@ -683,13 +647,19 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
         });
       }
 
-      // 3️⃣ Update card with photo URLs
+      // ====================================================
+      // 🖥 VPS MODE (commented out for now)
+      // ====================================================
+      /*
+      if (PHOTO_MODE === "vps") {
+        console.log("🖥 VPS mode is disabled for now");
+      }
+      */
+      
+      // Update card with photo URLs
       card = await prisma.idCard.update({
         where: { id: card.id },
-        data: {
-          rawPhotoUrl,
-          cleanPhotoUrl
-        },
+        data: { rawPhotoUrl, cleanPhotoUrl },
       });
     }
 
@@ -700,12 +670,10 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
 
   } catch (err) {
     console.error('❌ POST /api/idcards error:', err);
-    res.status(500).json({
-      error: 'Failed to create ID card',
-      details: err.message
-    });
+    res.status(500).json({ error: 'Failed to create ID card', details: err.message });
   }
 });
+
 /**
  * ✅ PUT /api/idcards/:id/photo
  * Upload a raw ID card photo, run Python rembg to remove background, and save both
@@ -730,41 +698,7 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
     let cleanPhotoUrl = '';
 
     // ====================================================
-    // 🖥 VPS MODE (Python + Local Disk)
-    // ====================================================
-    if (PHOTO_MODE === "vps") {
-      console.log("🖥 Using VPS mode (Python rembg)");
-
-      const photosDir = path.join(__dirname, 'photos');
-      if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
-
-      const ext = path.extname(req.file.originalname) || '.png';
-
-      // Save RAW
-      const rawFilename = `idcard_${id}_raw_${Date.now()}${ext}`;
-      const rawPath = path.join(photosDir, rawFilename);
-      fs.writeFileSync(rawPath, req.file.buffer);
-
-      rawPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${rawFilename}`;
-
-      // Python background removal
-      try {
-        const cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
-
-        const cleanFilename = `idcard_${id}_clean_${Date.now()}.png`;
-        const cleanPath = path.join(photosDir, cleanFilename);
-        fs.writeFileSync(cleanPath, cleanedBuffer);
-
-        cleanPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
-
-      } catch (err) {
-        console.warn("⚠️ Python cleaning failed:", err.message);
-        cleanPhotoUrl = rawPhotoUrl;
-      }
-    }
-
-    // ====================================================
-    // ☁️ CLOUDINARY MODE (AI Background Removal)
+    // ☁️ CLOUDINARY MODE
     // ====================================================
     if (PHOTO_MODE === "cloudinary") {
       console.log("☁️ Using Cloudinary AI mode");
@@ -782,7 +716,6 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
 
       rawPhotoUrl = uploadResult.secure_url;
 
-      // Generate AI background removal version
       cleanPhotoUrl = cloudinary.url(uploadResult.public_id, {
         transformation: [
           { effect: "background_removal" },
@@ -793,8 +726,14 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
     }
 
     // ====================================================
-    // 💾 UPDATE DATABASE
+    // 🖥 VPS MODE (commented out)
     // ====================================================
+    /*
+    if (PHOTO_MODE === "vps") {
+      console.log("🖥 VPS mode is disabled for now");
+    }
+    */
+
     const updatedCard = await prisma.idCard.update({
       where: { id },
       data: { rawPhotoUrl, cleanPhotoUrl },
@@ -822,57 +761,12 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
 
     let cleanPhotoUrl = '';
 
-    // ============================
-    // ☁️ CLOUDINARY MODE
-    // ============================
     if (PHOTO_MODE === "cloudinary") {
       console.log("☁️ Re-clean using Cloudinary AI");
 
-      // if the stored rawPhotoUrl still points at a local /photos/ URL (from
-      // previous VPS deployments) or the backend host, we need to push it to
-      // Cloudinary first so we have a public_id that the transformation API can
-      // work with.  serverless platforms like Vercel don't have a persistent
-      // disk so the old local path will 404, which is what you were seeing.
-      const isLocalRaw = card.rawPhotoUrl.startsWith('/photos/') ||
-        card.rawPhotoUrl.includes(`${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/`);
-
-      if (isLocalRaw) {
-        try {
-          console.log('📦 Migrating local rawPhotoUrl to Cloudinary');
-          let buf;
-          if (/^https?:\/\//.test(card.rawPhotoUrl)) {
-            const resp = await axios.get(card.rawPhotoUrl, {
-              responseType: 'arraybuffer',
-              timeout: 20000
-            });
-            buf = Buffer.from(resp.data);
-          } else {
-            const fname = path.basename(card.rawPhotoUrl);
-            buf = fs.readFileSync(path.join(__dirname, 'photos', fname));
-          }
-          const uploadResult = await new Promise((resolve, reject) => {
-            const stream = cloudinary.uploader.upload_stream(
-              {
-                folder: cloudFolder(CLOUDINARY_FOLDERS.photos),
-                resource_type: 'image'
-              },
-              (error, result) => error ? reject(error) : resolve(result)
-            );
-            streamifier.createReadStream(buf).pipe(stream);
-          });
-          card.rawPhotoUrl = uploadResult.secure_url;
-          // persist upgrade
-          await prisma.idCard.update({ where: { id }, data: { rawPhotoUrl: card.rawPhotoUrl } });
-          console.log('✅ Migration complete, new URL stored');
-        } catch (mErr) {
-          console.warn('⚠️ migrating rawPhotoUrl to Cloudinary failed:', mErr.message);
-          // we proceed anyway; next step may still error if public_id extraction
-        }
-      }
-
       const publicId = getCloudinaryPublicId(card.rawPhotoUrl);
       if (!publicId) {
-        throw new Error(`unable to parse public_id from url ${card.rawPhotoUrl}`);
+        throw new Error(`Unable to parse public_id from url ${card.rawPhotoUrl}`);
       }
 
       cleanPhotoUrl = cloudinary.url(publicId, {
@@ -884,36 +778,11 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
       });
     }
 
-    // ============================
-    // 🖥 VPS MODE
-    // ============================
+    /*
     if (PHOTO_MODE === "vps") {
-      console.log("🖥 Re-clean using Python rembg");
-
-      let buf;
-
-      if (/^https?:\/\//.test(card.rawPhotoUrl)) {
-        const resp = await axios.get(card.rawPhotoUrl, {
-          responseType: 'arraybuffer',
-          timeout: 20000
-        });
-        buf = Buffer.from(resp.data);
-      } else {
-        const fname = path.basename(card.rawPhotoUrl);
-        buf = fs.readFileSync(path.join(__dirname, 'photos', fname));
-      }
-
-      const cleaned = await removeBackgroundBuffer(buf);
-
-      const photosDir = path.join(__dirname, 'photos');
-      if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
-
-      const cleanFilename = `idcard_${id}_clean_${Date.now()}.png`;
-      const cleanPath = path.join(photosDir, cleanFilename);
-      fs.writeFileSync(cleanPath, cleaned);
-
-      cleanPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
+      console.log("🖥 VPS mode is disabled for now");
     }
+    */
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
@@ -927,12 +796,10 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
 
   } catch (err) {
     console.error('❌ PUT /api/idcards/:id/clean-photo failed:', err);
-    res.status(500).json({
-      error: 'Failed to re-clean photo',
-      details: err.message
-    });
+    res.status(500).json({ error: 'Failed to re-clean photo', details: err.message });
   }
 });
+
 // ---------- DELETE /api/idcards/:id ----------
 app.delete('/api/idcards/:id', authenticate, async (req, res) => {
   try {
