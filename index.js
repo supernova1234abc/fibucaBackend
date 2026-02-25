@@ -489,17 +489,15 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch ID cards' });
   }
 });
-
-
-// ---------- POST /api/idcards (create new card with optional photo) ----------
 app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   try {
     const { userId, fullName, company, role, cardNumber } = req.body;
+
     if (!userId || !fullName || !company || !role || !cardNumber) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Create the card first
+    // 1️⃣ Create card first (without photo)
     let card = await prisma.idCard.create({
       data: {
         userId: parseInt(userId),
@@ -512,47 +510,98 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
       }
     });
 
-    // If a photo file is uploaded, process it immediately
+    let rawPhotoUrl = '';
+    let cleanPhotoUrl = '';
+
+    // 2️⃣ If photo uploaded → process
     if (req.file && req.file.buffer) {
-      const photosDir = path.join(__dirname, 'photos');
-      if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
 
-      const ext = path.extname(req.file.originalname) || '.png';
-      const rawFilename = `idcard_${card.id}_raw_${Date.now()}${ext}`;
-      const rawPath = path.join(photosDir, rawFilename);
-      fs.writeFileSync(rawPath, req.file.buffer);
+      // ====================================================
+      // 🖥 VPS MODE
+      // ====================================================
+      if (PHOTO_MODE === "vps") {
+        console.log("🖥 POST using VPS mode");
 
-      let cleanedBuffer;
-      try {
-        cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
-      } catch (pyErr) {
-        console.warn('[idcard/photo] Background removal failed during creation:', pyErr.message);
+        const photosDir = path.join(__dirname, 'photos');
+        if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
+
+        const ext = path.extname(req.file.originalname) || '.png';
+
+        // Save RAW
+        const rawFilename = `idcard_${card.id}_raw_${Date.now()}${ext}`;
+        const rawPath = path.join(photosDir, rawFilename);
+        fs.writeFileSync(rawPath, req.file.buffer);
+
+        rawPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${rawFilename}`;
+
+        // Python background removal
+        try {
+          const cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
+
+          const cleanFilename = `idcard_${card.id}_clean_${Date.now()}.png`;
+          const cleanPath = path.join(photosDir, cleanFilename);
+          fs.writeFileSync(cleanPath, cleanedBuffer);
+
+          cleanPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
+
+        } catch (pyErr) {
+          console.warn("⚠️ Python cleaning failed:", pyErr.message);
+          cleanPhotoUrl = rawPhotoUrl;
+        }
       }
 
-      let cleanUrl = '';
-      if (cleanedBuffer) {
-        const cleanFilename = `idcard_${card.id}_clean_${Date.now()}.png`;
-        const cleanPath = path.join(photosDir, cleanFilename);
-        fs.writeFileSync(cleanPath, cleanedBuffer);
-        cleanUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
+      // ====================================================
+      // ☁️ CLOUDINARY MODE
+      // ====================================================
+      if (PHOTO_MODE === "cloudinary") {
+        console.log("☁️ POST using Cloudinary AI mode");
+
+        const uploadResult = await new Promise((resolve, reject) => {
+          const stream = cloudinary.uploader.upload_stream(
+            {
+              folder: 'fibuca/idcards',
+              resource_type: 'image'
+            },
+            (error, result) => error ? reject(error) : resolve(result)
+          );
+          streamifier.createReadStream(req.file.buffer).pipe(stream);
+        });
+
+        rawPhotoUrl = uploadResult.secure_url;
+
+        // AI background removal transformation
+        cleanPhotoUrl = cloudinary.url(uploadResult.public_id, {
+          transformation: [
+            { effect: "background_removal" },
+            { background: "white" },
+            { crop: "pad" }
+          ]
+        });
       }
 
-      const rawUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${rawFilename}`;
-
-      // Update card with photo URLs
+      // 3️⃣ Update card with photo URLs
       card = await prisma.idCard.update({
         where: { id: card.id },
-        data: { rawPhotoUrl: rawUrl, cleanPhotoUrl: cleanUrl },
+        data: {
+          rawPhotoUrl,
+          cleanPhotoUrl
+        },
       });
     }
 
-    res.status(201).json({ message: 'ID card created', card });
+    res.status(201).json({
+      message: `✅ ID card created using ${PHOTO_MODE} mode`,
+      card
+    });
+
   } catch (err) {
     console.error('❌ POST /api/idcards error:', err);
-    res.status(500).json({ error: 'Failed to create ID card', details: err.message });
+    res.status(500).json({
+      error: 'Failed to create ID card',
+      details: err.message
+    });
   }
 });
-
 /**
  * ✅ PUT /api/idcards/:id/photo
  * Upload a raw ID card photo, run Python rembg to remove background, and save both
