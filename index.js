@@ -46,11 +46,75 @@ function getCloudinaryPublicId(rawUrl) {
   return m ? m[1] : null;
 }
 
+// Ensure a card has cloud-based URLs when running in cloudinary mode.  If we
+// detect that rawPhotoUrl points at a local `/photos` path, we fetch the image
+// (from disk or via HTTP), upload it to Cloudinary, update the database, and
+// regenerate the cleaned URL.  This helper returns a fresh copy of the card
+// (which may have been updated).
+async function ensureCloudinaryUrls(card) {
+  if (PHOTO_MODE !== 'cloudinary' || !card.rawPhotoUrl) return card;
+
+  const isLocalRaw = card.rawPhotoUrl.startsWith('/photos/') ||
+    card.rawPhotoUrl.includes(`${process.env.VITE_BACKEND_URL || ''}/photos/`);
+  if (!isLocalRaw) return card;
+
+  try {
+    console.log(`📦 migrating existing rawPhotoUrl for card ${card.id} to Cloudinary`);
+    let buf;
+    if (/^https?:\/\//.test(card.rawPhotoUrl)) {
+      const resp = await axios.get(card.rawPhotoUrl, {
+        responseType: 'arraybuffer',
+        timeout: 20000
+      });
+      buf = Buffer.from(resp.data);
+    } else {
+      const fname = path.basename(card.rawPhotoUrl);
+      buf = fs.readFileSync(path.join(__dirname, 'photos', fname));
+    }
+    const uploadResult = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: cloudFolder(CLOUDINARY_FOLDERS.photos),
+          resource_type: 'image'
+        },
+        (error, result) => error ? reject(error) : resolve(result)
+      );
+      streamifier.createReadStream(buf).pipe(stream);
+    });
+    card.rawPhotoUrl = uploadResult.secure_url;
+
+    // update DB with new raw URL before regenerating clean
+    await prisma.idCard.update({ where: { id: card.id }, data: { rawPhotoUrl: card.rawPhotoUrl } });
+
+    const pub = getCloudinaryPublicId(card.rawPhotoUrl);
+    if (pub) {
+      card.cleanPhotoUrl = cloudinary.url(pub, {
+        transformation: [
+          { effect: 'background_removal' },
+          { background: 'white' },
+          { crop: 'pad' }
+        ]
+      });
+      await prisma.idCard.update({ where: { id: card.id }, data: { cleanPhotoUrl: card.cleanPhotoUrl } });
+    }
+
+    console.log(`✅ migration complete for card ${card.id}`);
+  } catch (mErr) {
+    console.warn('⚠️ failed to migrate card to Cloudinary:', mErr.message);
+  }
+  return card;
+}
+
 // ================= PHOTO PROCESSING MODE =================
 // MODE = "vps"  -> Use Python + local disk
 // MODE = "cloudinary" -> Use Cloudinary AI background removal
 const PHOTO_MODE = process.env.PHOTO_MODE || (process.env.VERCEL ? "cloudinary" : "vps");
 const axios = require('axios'); // used to fetch raw image server-side
+
+console.log(`📸 PHOTO_MODE is set to '${PHOTO_MODE}' (VERCEL=${!!process.env.VERCEL})`);
+if (process.env.VERCEL && PHOTO_MODE !== 'cloudinary') {
+  console.warn('⚠️ Running on Vercel but PHOTO_MODE is', PHOTO_MODE, '– Cloudinary is recommended; set PHOTO_MODE=cloudinary');
+}
 
 // ✅ Re-enabled: Optimized Python rembg with heavy memory optimization
 // Using remove_bg_buffer_optimized.py for streaming/chunked processing
@@ -506,10 +570,20 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    const cards = await prisma.idCard.findMany({
+    let cards = await prisma.idCard.findMany({
       where: { userId: uid },
       orderBy: { issuedAt: 'desc' }
     });
+
+    console.log(`🔍 fetched ${cards.length} cards for user ${uid} (PHOTO_MODE=${PHOTO_MODE})`);
+
+    // if we're in cloudinary mode, migrate any old local URLs before returning
+    if (PHOTO_MODE === 'cloudinary') {
+      await Promise.all(cards.map(async (c, i) => {
+        const updated = await ensureCloudinaryUrls(c);
+        cards[i] = updated;
+      }));
+    }
 
     res.json(cards);
   } catch (err) {
@@ -753,6 +827,48 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     // ============================
     if (PHOTO_MODE === "cloudinary") {
       console.log("☁️ Re-clean using Cloudinary AI");
+
+      // if the stored rawPhotoUrl still points at a local /photos/ URL (from
+      // previous VPS deployments) or the backend host, we need to push it to
+      // Cloudinary first so we have a public_id that the transformation API can
+      // work with.  serverless platforms like Vercel don't have a persistent
+      // disk so the old local path will 404, which is what you were seeing.
+      const isLocalRaw = card.rawPhotoUrl.startsWith('/photos/') ||
+        card.rawPhotoUrl.includes(`${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/`);
+
+      if (isLocalRaw) {
+        try {
+          console.log('📦 Migrating local rawPhotoUrl to Cloudinary');
+          let buf;
+          if (/^https?:\/\//.test(card.rawPhotoUrl)) {
+            const resp = await axios.get(card.rawPhotoUrl, {
+              responseType: 'arraybuffer',
+              timeout: 20000
+            });
+            buf = Buffer.from(resp.data);
+          } else {
+            const fname = path.basename(card.rawPhotoUrl);
+            buf = fs.readFileSync(path.join(__dirname, 'photos', fname));
+          }
+          const uploadResult = await new Promise((resolve, reject) => {
+            const stream = cloudinary.uploader.upload_stream(
+              {
+                folder: cloudFolder(CLOUDINARY_FOLDERS.photos),
+                resource_type: 'image'
+              },
+              (error, result) => error ? reject(error) : resolve(result)
+            );
+            streamifier.createReadStream(buf).pipe(stream);
+          });
+          card.rawPhotoUrl = uploadResult.secure_url;
+          // persist upgrade
+          await prisma.idCard.update({ where: { id }, data: { rawPhotoUrl: card.rawPhotoUrl } });
+          console.log('✅ Migration complete, new URL stored');
+        } catch (mErr) {
+          console.warn('⚠️ migrating rawPhotoUrl to Cloudinary failed:', mErr.message);
+          // we proceed anyway; next step may still error if public_id extraction
+        }
+      }
 
       const publicId = getCloudinaryPublicId(card.rawPhotoUrl);
       if (!publicId) {

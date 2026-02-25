@@ -70,6 +70,12 @@ These defaults were chosen to match the structure you described (`fibuca/phot`, 
 
 ## Testing
 
+If you have existing cards from a previous VPS deployment, their `rawPhotoUrl`
+may point at `/photos/...` which is not accessible on Vercel and will cause
+404s when attempting to re-clean.  Simply call the **clean-photo** endpoint
+and the server will automatically migrate the image to Cloudinary before
+applying the background removal transformation.
+
 ### 1. Upload ID Card Photo
 ```bash
 POST /api/idcards/1/photo
