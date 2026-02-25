@@ -18,6 +18,10 @@ cloudinary.config({
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+// ================= PHOTO PROCESSING MODE =================
+// MODE = "vps"  -> Use Python + local disk
+// MODE = "cloudinary" -> Use Cloudinary AI background removal
+const PHOTO_MODE = process.env.PHOTO_MODE || (process.env.VERCEL ? "cloudinary" : "vps");
 const axios = require('axios'); // used to fetch raw image server-side
 
 // ✅ Re-enabled: Optimized Python rembg with heavy memory optimization
@@ -554,6 +558,7 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
  * Upload a raw ID card photo, run Python rembg to remove background, and save both
 * raw and cleaned images to the local `photos/` folder.  Updates DB with local URLs.
 */
+
 app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -561,99 +566,94 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
 
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
+
     if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
       return res.status(403).json({ error: 'Forbidden' });
 
     if (!req.file || !req.file.buffer)
       return res.status(400).json({ error: 'No photo uploaded' });
 
-    const isVercel = !!process.env.VERCEL;
-    const fileExt = path.extname(req.file.originalname) || '.png';
-
     let rawPhotoUrl = '';
     let cleanPhotoUrl = '';
 
-    // -----------------------------
-    // 1️⃣ Save locally (VPS only)
-    // -----------------------------
-    if (!isVercel) {
+    // ====================================================
+    // 🖥 VPS MODE (Python + Local Disk)
+    // ====================================================
+    if (PHOTO_MODE === "vps") {
+      console.log("🖥 Using VPS mode (Python rembg)");
+
       const photosDir = path.join(__dirname, 'photos');
       if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
 
-      const rawFilename = `idcard_${id}_raw_${Date.now()}${fileExt}`;
+      const ext = path.extname(req.file.originalname) || '.png';
+
+      // Save RAW
+      const rawFilename = `idcard_${id}_raw_${Date.now()}${ext}`;
       const rawPath = path.join(photosDir, rawFilename);
       fs.writeFileSync(rawPath, req.file.buffer);
 
       rawPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${rawFilename}`;
 
-      // Optional background removal
+      // Python background removal
       try {
         const cleanedBuffer = await removeBackgroundBuffer(req.file.buffer);
+
         const cleanFilename = `idcard_${id}_clean_${Date.now()}.png`;
         const cleanPath = path.join(photosDir, cleanFilename);
         fs.writeFileSync(cleanPath, cleanedBuffer);
 
         cleanPhotoUrl = `${process.env.VITE_BACKEND_URL || `${req.protocol}://${req.get('host')}`}/photos/${cleanFilename}`;
+
       } catch (err) {
-        console.warn('Background removal failed:', err.message);
+        console.warn("⚠️ Python cleaning failed:", err.message);
+        cleanPhotoUrl = rawPhotoUrl;
       }
     }
 
-    // -----------------------------
-    // 2️⃣ Upload to Cloudinary
-    // -----------------------------
-    try {
-      // Raw photo
-      const rawUpload = await new Promise((resolve, reject) => {
+    // ====================================================
+    // ☁️ CLOUDINARY MODE (AI Background Removal)
+    // ====================================================
+    if (PHOTO_MODE === "cloudinary") {
+      console.log("☁️ Using Cloudinary AI mode");
+
+      const uploadResult = await new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
           {
-            folder: 'fibuca/idcards/raw',
-            resource_type: 'image',
+            folder: 'fibuca/idcards',
+            resource_type: 'image'
           },
-          (error, result) => (error ? reject(error) : resolve(result))
+          (error, result) => error ? reject(error) : resolve(result)
         );
         streamifier.createReadStream(req.file.buffer).pipe(stream);
       });
-      rawPhotoUrl = rawUpload.secure_url;
 
-      // Optional cleaned version
-      let bufferToClean = req.file.buffer;
-      if (!isVercel && cleanPhotoUrl) {
-        bufferToClean = fs.readFileSync(path.join(__dirname, 'photos', path.basename(cleanPhotoUrl)));
-      }
+      rawPhotoUrl = uploadResult.secure_url;
 
-      const cleanUpload = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          {
-            folder: 'fibuca/idcards/clean',
-            resource_type: 'image',
-            format: 'png',
-          },
-          (error, result) => (error ? reject(error) : resolve(result))
-        );
-        streamifier.createReadStream(bufferToClean).pipe(stream);
+      // Generate AI background removal version
+      cleanPhotoUrl = cloudinary.url(uploadResult.public_id, {
+        transformation: [
+          { effect: "background_removal" },
+          { background: "white" },
+          { crop: "pad" }
+        ]
       });
-
-      cleanPhotoUrl = cleanUpload.secure_url;
-    } catch (err) {
-      console.warn('Cloudinary upload failed:', err.message);
     }
 
-    // -----------------------------
-    // 3️⃣ Update DB
-    // -----------------------------
+    // ====================================================
+    // 💾 UPDATE DATABASE
+    // ====================================================
     const updatedCard = await prisma.idCard.update({
       where: { id },
       data: { rawPhotoUrl, cleanPhotoUrl },
     });
 
     res.json({
-      message: '✅ Photo uploaded (local & Cloudinary)',
+      message: `✅ Photo uploaded using ${PHOTO_MODE} mode`,
       card: updatedCard,
     });
 
   } catch (err) {
-    console.error('❌ /idcards/:id/photo failed:', err);
+    console.error("❌ Photo upload failed:", err);
     res.status(500).json({ error: 'Failed to upload photo', details: err.message });
   }
 });
