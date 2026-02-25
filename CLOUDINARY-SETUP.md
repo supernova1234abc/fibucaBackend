@@ -24,6 +24,19 @@ Cost: $0 (included in free tier)
 
 ## Implementation
 
+### Folder Configuration
+
+The server now allows overriding the Cloudinary root folder and subfolders via environment variables:
+
+```bash
+CLOUDINARY_BASE_FOLDER=fibuca          # default already 'fibuca'
+CLOUDINARY_PHOTOS_FOLDER=phot         # where raw ID‑card photos are stored
+CLOUDINARY_FORMS_FOLDER=forms         # PDF forms
+CLOUDINARY_IDCARDS_FOLDER=id          # (used for cleaned/processed assets)
+```
+
+These defaults were chosen to match the structure you described (`fibuca/phot`, `fibuca/forms`, `fibuca/id`).
+
 ### Endpoints Updated
 
 #### 1️⃣ `PUT /api/idcards/:id/photo`

@@ -18,6 +18,34 @@ cloudinary.config({
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+
+// ------ Cloudinary folder configuration ------
+// the root folder (usually 'fibuca') and subfolders may vary per project.
+// allow overrides via env vars so the code can run in different accounts.
+const CLOUDINARY_BASE_FOLDER = process.env.CLOUDINARY_BASE_FOLDER || 'fibuca';
+const CLOUDINARY_FOLDERS = {
+  photos: process.env.CLOUDINARY_PHOTOS_FOLDER || 'phot',      // user-submitted ID card photos
+  forms: process.env.CLOUDINARY_FORMS_FOLDER || 'forms',      // PDF forms
+  idcards: process.env.CLOUDINARY_IDCARDS_FOLDER || 'id',      // cleaned ID card images
+  // if you ever want a separate folder for generated PDFs, add here
+};
+
+function cloudFolder(sub) {
+  return `${CLOUDINARY_BASE_FOLDER}/${sub}`;
+}
+
+// helper for extracting a public_id from a Cloudinary URL.  the URL may
+// include version numbers or query params, so we trim those off.  the
+// resulting string is what `cloudinary.url()` expects when reapplying
+// transformations.
+function getCloudinaryPublicId(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  // drop query string
+  const url = rawUrl.split('?')[0];
+  const m = url.match(/\/upload\/(?:v\d+\/)?(.+?)\.(?:jpg|jpeg|png|gif|webp)$/i);
+  return m ? m[1] : null;
+}
+
 // ================= PHOTO PROCESSING MODE =================
 // MODE = "vps"  -> Use Python + local disk
 // MODE = "cloudinary" -> Use Cloudinary AI background removal
@@ -322,7 +350,7 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
         const stream = cloudinary.uploader.upload_stream(
           {
             resource_type: 'raw',    
-            folder: 'fibuca/forms',  
+            folder: cloudFolder(CLOUDINARY_FOLDERS.forms),
             public_id: publicId,
             format: 'pdf',
           },
@@ -559,7 +587,7 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
         const uploadResult = await new Promise((resolve, reject) => {
           const stream = cloudinary.uploader.upload_stream(
             {
-              folder: 'fibuca/idcards',
+              folder: cloudFolder(CLOUDINARY_FOLDERS.photos),
               resource_type: 'image'
             },
             (error, result) => error ? reject(error) : resolve(result)
@@ -569,7 +597,9 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
 
         rawPhotoUrl = uploadResult.secure_url;
 
-        // AI background removal transformation
+        // AI background removal transformation – we can re‑use the public_id
+        // returned by the upload so the cleaned version always points at the
+        // same asset but with a transformation applied.
         cleanPhotoUrl = cloudinary.url(uploadResult.public_id, {
           transformation: [
             { effect: "background_removal" },
@@ -668,7 +698,7 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
       const uploadResult = await new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
           {
-            folder: 'fibuca/idcards',
+            folder: cloudFolder(CLOUDINARY_FOLDERS.photos),
             resource_type: 'image'
           },
           (error, result) => error ? reject(error) : resolve(result)
@@ -724,10 +754,10 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     if (PHOTO_MODE === "cloudinary") {
       console.log("☁️ Re-clean using Cloudinary AI");
 
-      // Extract public_id from URL
-      const parts = card.rawPhotoUrl.split('/');
-      const publicIdWithExt = parts.slice(-2).join('/'); 
-      const publicId = publicIdWithExt.replace(/\.[^/.]+$/, "");
+      const publicId = getCloudinaryPublicId(card.rawPhotoUrl);
+      if (!publicId) {
+        throw new Error(`unable to parse public_id from url ${card.rawPhotoUrl}`);
+      }
 
       cleanPhotoUrl = cloudinary.url(publicId, {
         transformation: [
@@ -1130,7 +1160,7 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
     if (isVercel) {
 
       const uploadResult = await cloudinary.uploader.upload_stream(
-        { folder: "idcards_cleaned" },
+        { folder: cloudFolder(CLOUDINARY_FOLDERS.idcards) + '_cleaned' },
         async (error, result) => {
           if (error) throw error;
           cleanUrl = result.secure_url;
