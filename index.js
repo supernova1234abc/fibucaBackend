@@ -19,12 +19,15 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+const PHOTO_MODE = process.env.PHOTO_MODE || "cloudinary";
+
+
 // ------ Cloudinary folder configuration ------
 // the root folder (usually 'fibuca') and subfolders may vary per project.
 // allow overrides via env vars so the code can run in different accounts.
 const CLOUDINARY_BASE_FOLDER = process.env.CLOUDINARY_BASE_FOLDER || 'fibuca';
 const CLOUDINARY_FOLDERS = {
-  photos: process.env.CLOUDINARY_PHOTOS_FOLDER || 'phot',      // user-submitted ID card photos
+  photos: process.env.CLOUDINARY_PHOTOS_FOLDER || 'photo',      // user-submitted ID card photos
   forms: process.env.CLOUDINARY_FORMS_FOLDER || 'forms',      // PDF forms
   idcards: process.env.CLOUDINARY_IDCARDS_FOLDER || 'id',      // cleaned ID card images
   // if you ever want a separate folder for generated PDFs, add here
@@ -108,7 +111,8 @@ async function ensureCloudinaryUrls(card) {
 // ================= PHOTO PROCESSING MODE =================
 // MODE = "vps"  -> Use Python + local disk
 // MODE = "cloudinary" -> Use Cloudinary AI background removal
-const PHOTO_MODE = process.env.PHOTO_MODE || (process.env.VERCEL ? "cloudinary" : "vps");
+
+//const PHOTO_MODE = process.env.PHOTO_MODE || (process.env.VERCEL ? "cloudinary" : "vps");
 const axios = require('axios'); // used to fetch raw image server-side
 
 console.log(`📸 PHOTO_MODE is set to '${PHOTO_MODE}' (VERCEL=${!!process.env.VERCEL})`);
