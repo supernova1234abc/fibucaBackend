@@ -20,6 +20,7 @@ cloudinary.config({
 });
 
 const PHOTO_MODE = process.env.PHOTO_MODE || "cloudinary";
+//const PHOTO_MODE = process.env.PHOTO_MODE || (process.env.VERCEL ? "cloudinary" : "vps");
 
 
 // ------ Cloudinary folder configuration ------
@@ -112,7 +113,6 @@ async function ensureCloudinaryUrls(card) {
 // MODE = "vps"  -> Use Python + local disk
 // MODE = "cloudinary" -> Use Cloudinary AI background removal
 
-//const PHOTO_MODE = process.env.PHOTO_MODE || (process.env.VERCEL ? "cloudinary" : "vps");
 const axios = require('axios'); // used to fetch raw image server-side
 
 console.log(`📸 PHOTO_MODE is set to '${PHOTO_MODE}' (VERCEL=${!!process.env.VERCEL})`);
