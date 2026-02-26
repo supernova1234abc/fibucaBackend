@@ -19,8 +19,8 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const PHOTO_MODE = process.env.PHOTO_MODE || "cloudinary";
-//const PHOTO_MODE = process.env.PHOTO_MODE || (process.env.VERCEL ? "cloudinary" : "vps");
+//const PHOTO_MODE = process.env.PHOTO_MODE || "cloudinary";
+const PHOTO_MODE = process.env.PHOTO_MODE || (process.env.VERCEL ? "cloudinary" : "vps");
 
 
 // ------ Cloudinary folder configuration ------
