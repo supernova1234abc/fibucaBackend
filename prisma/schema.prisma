@@ -26,13 +26,18 @@ model User {
 }
 
 model StaffLink {
-  id         Int      @id @default(autoincrement())
-  token      String   @unique
-  staffId    Int
-  staff      User     @relation(fields: [staffId], references: [id], onDelete: Cascade)
-  isActive   Boolean  @default(true)
-  expiresAt  DateTime?
-  createdAt  DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  token       String   @unique
+  staffId     Int
+  staff       User     @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  maxUses     Int?     // null = unlimited
+  usedCount   Int      @default(0)
+
+  expiresAt   DateTime
+  isActive    Boolean  @default(true)
+
+  createdAt   DateTime @default(now())
 
   @@index([staffId])
 }
