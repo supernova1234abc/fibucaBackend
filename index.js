@@ -222,6 +222,7 @@ app.use('/photos', express.static(photosDir))
 // --------------------
 function authenticate(req, res, next) {
   // Accept token via Authorization header (Bearer ...) or cookie fibuca_token
+
   const authHeader = req.headers.authorization || req.headers.Authorization
   let token = null
   if (authHeader && typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
@@ -244,23 +245,16 @@ function authenticate(req, res, next) {
   }
 }
 
-const { token } = req.params;
-
-const link = await prisma.staffLink.findUnique({
-  where: { token },
-});
-
-if (!link || !link.isActive) {
-  return res.status(400).json({ error: "Invalid or inactive link" });
+    function requireRole(roles = []) {
+  return (req, res, next) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({ error: "Forbidden: insufficient role" });
+    }
+    next();
+  };
 }
 
-if (link.expiresAt < new Date()) {
-  return res.status(400).json({ error: "Link expired" });
-}
 
-if (link.maxUses && link.usedCount >= link.maxUses) {
-  return res.status(400).json({ error: "Link usage limit reached" });
-}
 
 // --------------------
 // PUBLIC ROUTES
@@ -409,9 +403,30 @@ app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
   }
 });
 
+
 // ---------- POST /submit-form ----------
 app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
   try {
+
+      const { token } = req.params;
+
+const link = await prisma.staffLink.findUnique({
+  where: { token },
+});
+
+if (!link || !link.isActive) {
+  return res.status(400).json({ error: "Invalid or inactive link" });
+}
+
+if (link.expiresAt < new Date()) {
+  return res.status(400).json({ error: "Link expired" });
+}
+
+if (link.maxUses && link.usedCount >= link.maxUses) {
+  return res.status(400).json({ error: "Link usage limit reached" });
+}
+
+
     // 1️⃣ Parse form JSON from frontend
     const form = JSON.parse(req.body.data);
     if (!req.file) return res.status(400).json({ error: "No PDF uploaded" });
@@ -435,7 +450,7 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
       new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
           {
-            resource_type: 'raw',    
+            resource_type: 'raw',
             folder: cloudFolder(CLOUDINARY_FOLDERS.forms),
             public_id: publicId,
             format: 'pdf',
@@ -468,7 +483,15 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
         witness: form.witness,
         pdfPath: pdfUrl,
         submittedAt: new Date(),
+        staffId: link.staffId,
       },
+    });
+
+
+    //increment link usage
+    await prisma.staffLink.update({ 
+      where: { id: link.id },
+      data: { usedCount: link.usedCount + 1 }
     });
 
     // 6️⃣ Check if user exists, else create
@@ -581,6 +604,7 @@ app.post(
 
 // GET /api/staff/validate/:token
 app.get("/api/staff/validate/:token", async (req, res) => {
+
   const { token } = req.params;
 
   const link = await prisma.staffLink.findUnique({
@@ -601,6 +625,47 @@ app.get("/api/staff/validate/:token", async (req, res) => {
 
   res.json({ valid: true });
 });
+
+// GET /api/staff/links
+app.get(
+  "/api/staff/links",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const links = await prisma.staffLink.findMany({
+        where: { staffId: req.user.id },
+        orderBy: { createdAt: "desc" },
+      });
+
+      res.json(links);
+    } catch (err) {
+      console.error("❌ fetch staff links error:", err);
+      res.status(500).json({ error: "Failed to fetch links" });
+    }
+  }
+);
+
+
+// GET /api/staff/submissions
+app.get(
+  "/api/staff/submissions",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const submissions = await prisma.submission.findMany({
+        where: { staffId: req.user.id },
+        orderBy: { submittedAt: "desc" },
+      });
+
+      res.json(submissions);
+    } catch (err) {
+      console.error("❌ fetch staff submissions error:", err);
+      res.status(500).json({ error: "Failed to fetch submissions" });
+    }
+  }
+);
 
 /**
  * ✅ POST /bulk-upload
@@ -741,7 +806,7 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
         console.log("🖥 VPS mode is disabled for now");
       }
       */
-      
+
       // Update card with photo URLs
       card = await prisma.idCard.update({
         where: { id: card.id },
@@ -894,7 +959,7 @@ app.delete('/api/idcards/:id', authenticate, async (req, res) => {
 
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
-    if (req.user.role === 'CLIENT' && req.user.id !== card.userId) 
+    if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
       return res.status(403).json({ error: 'Forbidden' });
 
     await prisma.idCard.delete({ where: { id } });
@@ -907,7 +972,8 @@ app.delete('/api/idcards/:id', authenticate, async (req, res) => {
 
 // GET   /api/admin/users
 // List all users (omit password)
-app.get('/api/admin/users', /* requireAuth, requireRole(['ADMIN','SUPERADMIN']), */ async (req, res) => {
+app.get('/api/admin/users', 
+  authenticate, requireRole(['ADMIN','SUPERADMIN']),async (req, res) => {
   try {
     const users = await prisma.user.findMany({
       select: {
@@ -932,7 +998,8 @@ app.get('/api/admin/users', /* requireAuth, requireRole(['ADMIN','SUPERADMIN']),
 // ——————————————————————————
 // POST  /api/admin/users
 // Create a new user
-app.post('/api/admin/users', /* requireAuth, requireRole(['ADMIN','SUPERADMIN']), */ async (req, res) => {
+app.post('/api/admin/users', 
+  authenticate, requireRole(['ADMIN','SUPERADMIN']), async (req, res) => {
   const { name, username, email, password, role, employeeNumber } = req.body
 
   if (!name || !username || !password || !employeeNumber) {
@@ -991,7 +1058,8 @@ app.post('/api/admin/users', /* requireAuth, requireRole(['ADMIN','SUPERADMIN'])
 // ——————————————————————————
 // PUT   /api/admin/users/:id
 // Update name, email, role or employeeNumber
-app.put('/api/admin/users/:id', /* requireAuth, requireRole(['ADMIN','SUPERADMIN']), */ async (req, res) => {
+app.put('/api/admin/users/:id', 
+  authenticate, requireRole(['ADMIN','SUPERADMIN']), async (req, res) => {
   const { id } = req.params
   const { name, email, role, employeeNumber } = req.body
 
@@ -1044,7 +1112,8 @@ app.put('/api/admin/users/:id', /* requireAuth, requireRole(['ADMIN','SUPERADMIN
 // ——————————————————————————
 // DELETE /api/admin/users/:id
 // Delete a user by ID (supports cascade or soft delete)
-app.delete('/api/admin/users/:id', /* requireAuth, requireRole(['ADMIN','SUPERADMIN']), */ async (req, res) => {
+app.delete('/api/admin/users/:id', 
+  authenticate, requireRole(['ADMIN','SUPERADMIN']), async (req, res) => {
   const id = Number(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid user ID' });
 
