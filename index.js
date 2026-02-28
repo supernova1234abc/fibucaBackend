@@ -972,6 +972,7 @@ app.delete('/api/idcards/:id', authenticate, async (req, res) => {
 
 // GET   /api/admin/users
 // List all users (omit password)
+
 app.get('/api/admin/users', 
   authenticate, requireRole(['ADMIN','SUPERADMIN']),async (req, res) => {
   try {
