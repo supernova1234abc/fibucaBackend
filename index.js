@@ -244,6 +244,24 @@ function authenticate(req, res, next) {
   }
 }
 
+const { token } = req.params;
+
+const link = await prisma.staffLink.findUnique({
+  where: { token },
+});
+
+if (!link || !link.isActive) {
+  return res.status(400).json({ error: "Invalid or inactive link" });
+}
+
+if (link.expiresAt < new Date()) {
+  return res.status(400).json({ error: "Link expired" });
+}
+
+if (link.maxUses && link.usedCount >= link.maxUses) {
+  return res.status(400).json({ error: "Link usage limit reached" });
+}
+
 // --------------------
 // PUBLIC ROUTES
 // --------------------
@@ -392,7 +410,7 @@ app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
 });
 
 // ---------- POST /submit-form ----------
-app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
+app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
   try {
     // 1️⃣ Parse form JSON from frontend
     const form = JSON.parse(req.body.data);
@@ -520,6 +538,70 @@ app.post("/submit-form", uploadPDF.single("pdf"), async (req, res) => {
     res.status(500).json({ error: "Failed to submit form", details: err.message });
   }
 });
+
+const crypto = require("crypto");
+
+// POST /api/staff/generate-link
+app.post(
+  "/api/staff/generate-link",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const { hoursValid, maxUses } = req.body;
+
+      const token = crypto.randomBytes(32).toString("hex");
+
+      const expiresAt = new Date(
+        Date.now() + (hoursValid || 24) * 60 * 60 * 1000
+      );
+
+      const link = await prisma.staffLink.create({
+        data: {
+          token,
+          staffId: req.user.id,
+          expiresAt,
+          maxUses: maxUses || null,
+        },
+      });
+
+      res.json({
+        message: "✅ Link created",
+        link: `${process.env.FRONTEND_URL}/submission/${token}`,
+        expiresAt,
+        maxUses: link.maxUses,
+      });
+    } catch (err) {
+      console.error("❌ generate-link error:", err);
+      res.status(500).json({ error: "Failed to generate link" });
+    }
+  }
+);
+
+
+// GET /api/staff/validate/:token
+app.get("/api/staff/validate/:token", async (req, res) => {
+  const { token } = req.params;
+
+  const link = await prisma.staffLink.findUnique({
+    where: { token },
+  });
+
+  if (!link || !link.isActive) {
+    return res.status(400).json({ error: "Invalid link" });
+  }
+
+  if (link.expiresAt < new Date()) {
+    return res.status(400).json({ error: "Link expired" });
+  }
+
+  if (link.maxUses && link.usedCount >= link.maxUses) {
+    return res.status(400).json({ error: "Link usage limit reached" });
+  }
+
+  res.json({ valid: true });
+});
+
 /**
  * ✅ POST /bulk-upload
  * Receives an array of user records from Excel and saves them
