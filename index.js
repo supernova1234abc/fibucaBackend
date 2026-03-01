@@ -589,7 +589,7 @@ app.post(
       });
 
       // Generate frontend URL with fallback
-      const frontendUrl = process.env.FRONTEND_URL || 
+      const frontendUrl = process.env.VITE_FRONTEND_URL || 
         (process.env.VERCEL ? 'https://fibuca-frontend.vercel.app' : `${req.protocol}://${req.get('host')}`);
 
       res.json({
