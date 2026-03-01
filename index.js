@@ -730,6 +730,7 @@ app.get(
   requireRole(["ADMIN", "SUPERADMIN"]),
   async (req, res) => {
     try {
+      console.log("📊 Fetching staff leaderboard...");
       const staffUsers = await prisma.user.findMany({
         where: { role: "STAFF" },
         select: {
@@ -741,6 +742,8 @@ app.get(
           createdAt: true
         }
       });
+
+      console.log(`✅ Found ${staffUsers.length} STAFF users`);
 
       // For each staff user, count their active links
       const staffWithLinks = await Promise.all(
@@ -760,6 +763,8 @@ app.get(
             where: { staffId: staff.id }
           });
 
+          console.log(`  Staff: ${staff.name} - Active: ${activeLinks}, Total: ${totalLinks}, Clients: ${totalClients}`);
+
           return {
             ...staff,
             activeLinks,
@@ -772,6 +777,7 @@ app.get(
       // Sort by activeLinks descending
       const ranked = staffWithLinks.sort((a, b) => b.activeLinks - a.activeLinks);
 
+      console.log(`📈 Returning ${ranked.length} ranked staff members`);
       res.json(ranked);
     } catch (err) {
       console.error("❌ staff leaderboard error:", err);
