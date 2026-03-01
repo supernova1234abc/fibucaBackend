@@ -721,6 +721,64 @@ app.get(
   }
 );
 
+// ——————————————————————————
+// GET /api/staff/leaderboard
+// Get all staff users ranked by active links count
+app.get(
+  "/api/staff/leaderboard",
+  authenticate,
+  requireRole(["ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const staffUsers = await prisma.user.findMany({
+        where: { role: "STAFF" },
+        select: {
+          id: true,
+          name: true,
+          username: true,
+          email: true,
+          employeeNumber: true,
+          createdAt: true
+        }
+      });
+
+      // For each staff user, count their active links
+      const staffWithLinks = await Promise.all(
+        staffUsers.map(async (staff) => {
+          const activeLinks = await prisma.staffLink.count({
+            where: {
+              staffId: staff.id,
+              isActive: true
+            }
+          });
+
+          const totalLinks = await prisma.staffLink.count({
+            where: { staffId: staff.id }
+          });
+
+          const totalClients = await prisma.submission.count({
+            where: { staffId: staff.id }
+          });
+
+          return {
+            ...staff,
+            activeLinks,
+            totalLinks,
+            totalClients
+          };
+        })
+      );
+
+      // Sort by activeLinks descending
+      const ranked = staffWithLinks.sort((a, b) => b.activeLinks - a.activeLinks);
+
+      res.json(ranked);
+    } catch (err) {
+      console.error("❌ staff leaderboard error:", err);
+      res.status(500).json({ error: "Failed to fetch leaderboard" });
+    }
+  }
+);
 
 app.delete(
   "/api/staff/link/:id",
