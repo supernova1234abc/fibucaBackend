@@ -588,9 +588,20 @@ app.post(
         },
       });
 
-      // Generate frontend URL with fallback
-      const frontendUrl = process.env.VITE_FRONTEND_URL || 
-        (process.env.VERCEL ? 'https://fibuca-frontend.vercel.app' : `${req.protocol}://${req.get('host')}`);
+      // Generate frontend URL with simplified fallback
+      let frontendUrl = process.env.VITE_FRONTEND_URL;
+      
+      // If env var not set and on Vercel, use production URL
+      if (!frontendUrl && process.env.VERCEL) {
+        frontendUrl = 'https://fibuca-frontend.vercel.app';
+      }
+      
+      // Otherwise use request origin for local development
+      if (!frontendUrl) {
+        frontendUrl = `${req.protocol}://${req.get('host')}`;
+      }
+
+      console.log(`✅ Generate-link: frontendUrl="${frontendUrl}", VERCEL=${process.env.VERCEL}, VITE_FRONTEND_URL="${process.env.VITE_FRONTEND_URL}"`);
 
       res.json({
         message: "✅ Link created",
