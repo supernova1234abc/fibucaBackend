@@ -405,6 +405,7 @@ app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
 
 
 // ---------- POST /submit-form ----------
+
 app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
   try {
 
@@ -414,16 +415,14 @@ const link = await prisma.staffLink.findUnique({
   where: { token },
 });
 
-if (!link || !link.isActive) {
-  return res.status(400).json({ error: "Invalid or inactive link" });
+if (!link) {
+  return res.status(400).json({ error: "Invalid link" });
 }
 
-if (link.expiresAt < new Date()) {
-  return res.status(400).json({ error: "Link expired" });
-}
+await refreshLinkStatus(link);
 
-if (link.maxUses && link.usedCount >= link.maxUses) {
-  return res.status(400).json({ error: "Link usage limit reached" });
+if (!link.isActive) {
+  return res.status(400).json({ error: "Link expired or inactive" });
 }
 
 
@@ -491,7 +490,7 @@ if (link.maxUses && link.usedCount >= link.maxUses) {
     //increment link usage
     await prisma.staffLink.update({ 
       where: { id: link.id },
-      data: { usedCount: link.usedCount + 1 }
+      data: { usedCount: { increment: 1 } }
     });
 
     // 6️⃣ Check if user exists, else create
@@ -619,26 +618,29 @@ app.post(
 
 // GET /api/staff/validate/:token
 app.get("/api/staff/validate/:token", async (req, res) => {
+  try {
+    const { token } = req.params;
 
-  const { token } = req.params;
+    let link = await prisma.staffLink.findUnique({
+      where: { token },
+    });
 
-  const link = await prisma.staffLink.findUnique({
-    where: { token },
-  });
+    if (!link) {
+      return res.status(400).json({ error: "Invalid link" });
+    }
 
-  if (!link || !link.isActive) {
-    return res.status(400).json({ error: "Invalid link" });
+    link = await refreshLinkStatus(link);
+
+    if (!link.isActive) {
+      return res.status(400).json({ error: "Link expired or inactive" });
+    }
+
+    res.json({ valid: true });
+
+  } catch (err) {
+    console.error("❌ validate link error:", err);
+    res.status(500).json({ error: "Validation failed" });
   }
-
-  if (link.expiresAt < new Date()) {
-    return res.status(400).json({ error: "Link expired" });
-  }
-
-  if (link.maxUses && link.usedCount >= link.maxUses) {
-    return res.status(400).json({ error: "Link usage limit reached" });
-  }
-
-  res.json({ valid: true });
 });
 
 // GET /api/staff/links
@@ -681,6 +683,85 @@ app.get(
     }
   }
 );
+
+app.get(
+  "/api/staff/stats",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const staffId = req.user.id;
+
+      const totalLinks = await prisma.staffLink.count({
+        where: { staffId }
+      });
+
+      const activeLinks = await prisma.staffLink.count({
+        where: {
+          staffId,
+          isActive: true
+        }
+      });
+
+      const totalClients = await prisma.submission.count({
+        where: { staffId }
+      });
+
+      res.json({
+        totalLinks,
+        activeLinks,
+        expiredLinks: totalLinks - activeLinks,
+        totalClients
+      });
+
+    } catch (err) {
+      console.error("❌ staff stats error:", err);
+      res.status(500).json({ error: "Failed to fetch stats" });
+    }
+  }
+);
+
+
+app.delete(
+  "/api/staff/link/:id",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid ID" });
+
+      const link = await prisma.staffLink.findUnique({
+        where: { id }
+      });
+
+      if (!link) return res.status(404).json({ error: "Link not found" });
+
+      if (link.staffId !== req.user.id && req.user.role === "STAFF") {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      if (link.usedCount > 0) {
+        return res.status(400).json({
+          error: "Cannot delete a used link"
+        });
+      }
+
+      await prisma.staffLink.delete({
+        where: { id }
+      });
+
+      res.json({ message: "Link deleted successfully" });
+
+    } catch (err) {
+      console.error("❌ delete link error:", err);
+      res.status(500).json({ error: "Failed to delete link" });
+    }
+  }
+);
+
+
+
 
 /**
  * ✅ POST /bulk-upload
@@ -1176,6 +1257,50 @@ app.delete('/api/admin/users/:id',
     res.status(500).json({ error: 'Failed to delete user', details: err.message });
   }
 });
+
+app.get(
+  "/api/admin/staff-performance",
+  authenticate,
+  requireRole(["ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const staff = await prisma.user.findMany({
+        where: { role: "STAFF" },
+        select: {
+          id: true,
+          name: true,
+          email: true
+        }
+      });
+
+      const result = [];
+
+      for (const s of staff) {
+        const totalClients = await prisma.submission.count({
+          where: { staffId: s.id }
+        });
+
+        const totalLinks = await prisma.staffLink.count({
+          where: { staffId: s.id }
+        });
+
+        result.push({
+          ...s,
+          totalClients,
+          totalLinks
+        });
+      }
+
+      res.json(result);
+
+    } catch (err) {
+      console.error("❌ staff performance error:", err);
+      res.status(500).json({ error: "Failed to fetch performance" });
+    }
+  }
+);
+
+
 // ——————————————————————————
 // Submissions endpoints (used by frontend at '/submissions')
 // GET /submissions -> ADMIN: all submissions; CLIENT: their own submissions
