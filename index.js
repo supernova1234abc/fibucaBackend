@@ -130,22 +130,32 @@ console.log('✅ Using optimized Python rembg with streaming for low-RAM systems
 // Refresh link status based on expiration time and max uses
 async function refreshLinkStatus(link) {
   try {
+    if (!link || !link.id) {
+      console.error('❌ refreshLinkStatus: Invalid link object', link);
+      return link;
+    }
+
     const now = new Date();
     const isExpired = link.expiresAt && new Date(link.expiresAt) < now;
     const isMaxedOut = link.maxUses && link.usedCount >= link.maxUses;
-    const shouldBeActive = !isExpired && !isMaxedOut;
+    const shouldBeActive = !isExpired && !isMaxedOut && link.isActive;
 
+    console.log(`🔗 Checking link ${link.id}: expired=${isExpired}, maxedOut=${isMaxedOut}, active=${link.isActive}, should be=${shouldBeActive}`);
+
+    // Only update if status changed
     if (link.isActive !== shouldBeActive) {
-      link.isActive = shouldBeActive;
-      await prisma.staffLink.update({
+      console.log(`📝 Updating link ${link.id} status from ${link.isActive} to ${shouldBeActive}`);
+      const updated = await prisma.staffLink.update({
         where: { id: link.id },
         data: { isActive: shouldBeActive }
       });
+      return updated;
     }
+    
     return link;
   } catch (err) {
-    console.error('❌ refreshLinkStatus error:', err);
-    return link; // Return unchanged link on error
+    console.error('❌ refreshLinkStatus error:', err.message);
+    throw err; // Re-throw to let caller handle it
   }
 }
 
@@ -644,24 +654,41 @@ app.get("/api/staff/validate/:token", async (req, res) => {
   try {
     const { token } = req.params;
 
+    console.log(`🔍 Validating token: ${token.substring(0, 16)}...`);
+
+    if (!token) {
+      return res.status(400).json({ error: "Token is required" });
+    }
+
     let link = await prisma.staffLink.findUnique({
       where: { token },
     });
 
     if (!link) {
+      console.warn('❌ Link not found:', token);
       return res.status(400).json({ error: "Invalid link" });
     }
 
-    link = await refreshLinkStatus(link);
+    console.log('✅ Link found, checking status...');
+
+    try {
+      link = await refreshLinkStatus(link);
+    } catch (refreshErr) {
+      console.error('❌ Error refreshing link status:', refreshErr.message);
+      return res.status(500).json({ error: "Failed to validate link" });
+    }
 
     if (!link.isActive) {
+      console.warn('❌ Link is inactive');
       return res.status(400).json({ error: "Link expired or inactive" });
     }
 
+    console.log('✅ Link is valid');
     res.json({ valid: true });
 
   } catch (err) {
-    console.error("❌ validate link error:", err);
+    console.error("❌ validate link error:", err.message);
+    console.error(err);
     res.status(500).json({ error: "Validation failed" });
   }
 });
