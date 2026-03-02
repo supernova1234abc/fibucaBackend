@@ -128,38 +128,48 @@ console.log('✅ Using optimized Python rembg with streaming for low-RAM systems
 
 // ================= STAFF LINK HELPER FUNCTION =================
 // Refresh link status based on expiration time and max uses
-// Note: A link is ONLY active if:
-// 1. It hasn't expired (expiresAt > now)
-// 2. It hasn't reached max uses (usedCount < maxUses or maxUses is null)
+// NOTE: Handles both new and old schema versions
 async function refreshLinkStatus(link) {
   try {
     if (!link || !link.id) {
-      console.error('❌ refreshLinkStatus: Invalid link object', link);
+      console.error('❌ refreshLinkStatus: Invalid link object');
       return link;
     }
 
     const now = new Date();
-    // Check if link has expired
-    const isExpired = link.expiresAt && new Date(link.expiresAt) < now;
-    // Check if link has reached max uses
-    const isMaxedOut = link.maxUses && link.usedCount >= link.maxUses;
+    
+    // Safety check: expiresAt should be a valid Date
+    let expiresAt = link.expiresAt;
+    if (!expiresAt) {
+      console.warn(`⚠️ Link ${link.id} has no expiresAt - treating as expired`);
+      expiresAt = new Date(0); // Far past
+    } else if (typeof expiresAt === 'string') {
+      expiresAt = new Date(expiresAt);
+    }
+    
+    const isExpired = expiresAt < now;
+    // Safely check maxUses and usedCount (might not exist in old DB records)
+    const maxUses = link.maxUses || null;
+    const usedCount = link.usedCount || 0;
+    const isMaxedOut = maxUses && usedCount >= maxUses;
+    
     // Link should be active only if NOT expired and NOT maxed out
     const shouldBeActive = !isExpired && !isMaxedOut;
 
-    console.log(`🔗 Validating link ${link.id}: expired=${isExpired}, maxedOut=${isMaxedOut}, currentActive=${link.isActive}, shouldBeActive=${shouldBeActive}`);
+    console.log(`🔗 Link ${link.id}: expired=${isExpired} (expiry=${expiresAt.toISOString()}), maxedOut=${isMaxedOut} (uses=${usedCount}/${maxUses}), currentActive=${link.isActive}, shouldBeActive=${shouldBeActive}`);
 
     // Only update if status changed
     if (link.isActive !== shouldBeActive) {
-      console.log(`📝 Updating link ${link.id} isActive: ${link.isActive} → ${shouldBeActive}`);
+      console.log(`📝 Updating link ${link.id}: isActive ${link.isActive} → ${shouldBeActive}`);
       const updated = await prisma.staffLink.update({
         where: { id: link.id },
         data: { isActive: shouldBeActive }
       });
-      console.log(`✅ Link ${link.id} updated`);
+      console.log(`✅ Link ${link.id} status updated`);
       return updated;
     }
     
-    console.log(`✅ Link ${link.id} status is correct`);
+    console.log(`✅ Link ${link.id} status is current`);
     return link;
   } catch (err) {
     console.error('❌ refreshLinkStatus error:', err.message);
