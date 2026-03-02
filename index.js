@@ -129,6 +129,7 @@ console.log('✅ Using optimized Python rembg with streaming for low-RAM systems
 // ================= STAFF LINK HELPER FUNCTION =================
 // Refresh link status based on expiration time and max uses
 // NOTE: Handles both new and old schema versions
+// This function is CRITICAL for validating staff-generated share links
 async function refreshLinkStatus(link) {
   try {
     if (!link || !link.id) {
