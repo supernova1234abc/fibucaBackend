@@ -161,20 +161,27 @@ async function refreshLinkStatus(link) {
     // Only update if status changed
     if (link.isActive !== shouldBeActive) {
       console.log(`📝 Updating link ${link.id}: isActive ${link.isActive} → ${shouldBeActive}`);
-      const updated = await prisma.staffLink.update({
-        where: { id: link.id },
-        data: { isActive: shouldBeActive }
-      });
-      console.log(`✅ Link ${link.id} status updated`);
-      return updated;
+      try {
+        const updated = await prisma.staffLink.update({
+          where: { id: link.id },
+          data: { isActive: shouldBeActive }
+        });
+        console.log(`✅ Link ${link.id} status updated in database`);
+        return updated;
+      } catch (updateErr) {
+        console.error(`❌ Failed to update link ${link.id}:`, updateErr.message);
+        // Return modified link object even if DB update fails
+        return { ...link, isActive: shouldBeActive };
+      }
     }
     
-    console.log(`✅ Link ${link.id} status is current`);
+    console.log(`✅ Link ${link.id} status is current (no update needed)`);
     return link;
   } catch (err) {
-    console.error('❌ refreshLinkStatus error:', err.message);
+    console.error('❌ refreshLinkStatus unexpected error:', err.message);
     console.error('Stack:', err.stack);
-    throw err;
+    // Always return the link, never fail - let validation use what we have
+    return link;
   }
 }
 
@@ -463,7 +470,7 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
 
       const { token } = req.params;
 
-const link = await prisma.staffLink.findUnique({
+let link = await prisma.staffLink.findUnique({
   where: { token },
 });
 
@@ -471,9 +478,15 @@ if (!link) {
   return res.status(400).json({ error: "Invalid link" });
 }
 
-const updatedLink = await refreshLinkStatus(link);
+let updatedLink = link;
+try {
+  updatedLink = await refreshLinkStatus(link);
+} catch (err) {
+  console.error('❌ Failed to refresh link status:', err.message);
+  updatedLink = link; // Use original if refresh fails
+}
 
-if (!updatedLink.isActive) {
+if (!updatedLink || !updatedLink.isActive) {
   return res.status(400).json({ error: "Link expired or inactive" });
 }
 
@@ -675,8 +688,8 @@ app.get("/api/staff/validate/:token", async (req, res) => {
 
     console.log(`🔍 Validate request: token="${token ? token.substring(0, 16) + '...' : 'NONE'}"`);
 
-    if (!token || typeof token !== 'string') {
-      console.warn('❌ Invalid token parameter');
+    if (!token || typeof token !== 'string' || token.trim().length === 0) {
+      console.warn('❌ Invalid or empty token parameter');
       return res.status(400).json({ error: "Token is required" });
     }
 
@@ -687,7 +700,7 @@ app.get("/api/staff/validate/:token", async (req, res) => {
       });
     } catch (dbErr) {
       console.error('❌ Database error finding link:', dbErr.message);
-      return res.status(500).json({ error: "Database error" });
+      return res.status(500).json({ error: "Database error", details: dbErr.message });
     }
 
     if (!link) {
@@ -697,27 +710,31 @@ app.get("/api/staff/validate/:token", async (req, res) => {
 
     console.log(`✅ Link found: id=${link.id}, active=${link.isActive}, expires=${link.expiresAt}`);
 
-    // Refresh and validate link status
-    let validLink = null;
+    // Refresh and validate link status (but don't let failures stop validation)
+    let validLink = link;
     try {
       validLink = await refreshLinkStatus(link);
+      console.log(`✅ Link status refreshed: isActive=${validLink.isActive}`);
     } catch (refreshErr) {
-      console.error('❌ Link status refresh failed:', refreshErr.message);
-      // Still allow validation if the refresh failed, just use current status
+      console.error('❌ Link status refresh threw error (using current status):', refreshErr.message);
       validLink = link;
     }
 
-    if (!validLink || !validLink.isActive) {
-      const reason = !validLink ? 'refresh failed' : 'link inactive';
-      console.warn(`❌ Link validation failed (${reason})`);
+    if (!validLink) {
+      console.error('❌ Link validation returned null');
+      return res.status(400).json({ error: "Link validation failed" });
+    }
+
+    if (!validLink.isActive) {
+      console.warn(`❌ Link ${validLink.id} is not active`);
       return res.status(400).json({ error: "Link expired or inactive" });
     }
 
-    console.log(`✅ Link ${validLink.id} is valid and active`);
+    console.log(`✅ Link ${validLink.id} is valid and active - VALIDATION PASSED`);
     res.json({ valid: true });
 
   } catch (err) {
-    console.error("❌ Validate endpoint error:", err.message);
+    console.error("❌ Validate endpoint unhandled error:", err.message);
     console.error("Stack trace:", err.stack);
     res.status(500).json({ error: "Validation failed", details: err.message });
   }
