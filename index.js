@@ -126,6 +126,29 @@ if (process.env.VERCEL && PHOTO_MODE !== 'cloudinary') {
 const { removeBackgroundBuffer } = require('./py-tools/utils/runPython');
 console.log('✅ Using optimized Python rembg with streaming for low-RAM systems');
 
+// ================= STAFF LINK HELPER FUNCTION =================
+// Refresh link status based on expiration time and max uses
+async function refreshLinkStatus(link) {
+  try {
+    const now = new Date();
+    const isExpired = link.expiresAt && new Date(link.expiresAt) < now;
+    const isMaxedOut = link.maxUses && link.usedCount >= link.maxUses;
+    const shouldBeActive = !isExpired && !isMaxedOut;
+
+    if (link.isActive !== shouldBeActive) {
+      link.isActive = shouldBeActive;
+      await prisma.staffLink.update({
+        where: { id: link.id },
+        data: { isActive: shouldBeActive }
+      });
+    }
+    return link;
+  } catch (err) {
+    console.error('❌ refreshLinkStatus error:', err);
+    return link; // Return unchanged link on error
+  }
+}
+
 const app = express()
 
 // ---------- CORS & upload configuration ----------
@@ -419,9 +442,9 @@ if (!link) {
   return res.status(400).json({ error: "Invalid link" });
 }
 
-await refreshLinkStatus(link);
+const updatedLink = await refreshLinkStatus(link);
 
-if (!link.isActive) {
+if (!updatedLink.isActive) {
   return res.status(400).json({ error: "Link expired or inactive" });
 }
 
@@ -482,14 +505,14 @@ if (!link.isActive) {
         witness: form.witness,
         pdfPath: pdfUrl,
         submittedAt: new Date(),
-        staffId: link.staffId,
+        staffId: updatedLink.staffId,
       },
     });
 
 
     //increment link usage
     await prisma.staffLink.update({ 
-      where: { id: link.id },
+      where: { id: updatedLink.id },
       data: { usedCount: { increment: 1 } }
     });
 
