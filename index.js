@@ -128,6 +128,9 @@ console.log('✅ Using optimized Python rembg with streaming for low-RAM systems
 
 // ================= STAFF LINK HELPER FUNCTION =================
 // Refresh link status based on expiration time and max uses
+// Note: A link is ONLY active if:
+// 1. It hasn't expired (expiresAt > now)
+// 2. It hasn't reached max uses (usedCount < maxUses or maxUses is null)
 async function refreshLinkStatus(link) {
   try {
     if (!link || !link.id) {
@@ -136,26 +139,32 @@ async function refreshLinkStatus(link) {
     }
 
     const now = new Date();
+    // Check if link has expired
     const isExpired = link.expiresAt && new Date(link.expiresAt) < now;
+    // Check if link has reached max uses
     const isMaxedOut = link.maxUses && link.usedCount >= link.maxUses;
-    const shouldBeActive = !isExpired && !isMaxedOut && link.isActive;
+    // Link should be active only if NOT expired and NOT maxed out
+    const shouldBeActive = !isExpired && !isMaxedOut;
 
-    console.log(`🔗 Checking link ${link.id}: expired=${isExpired}, maxedOut=${isMaxedOut}, active=${link.isActive}, should be=${shouldBeActive}`);
+    console.log(`🔗 Validating link ${link.id}: expired=${isExpired}, maxedOut=${isMaxedOut}, currentActive=${link.isActive}, shouldBeActive=${shouldBeActive}`);
 
     // Only update if status changed
     if (link.isActive !== shouldBeActive) {
-      console.log(`📝 Updating link ${link.id} status from ${link.isActive} to ${shouldBeActive}`);
+      console.log(`📝 Updating link ${link.id} isActive: ${link.isActive} → ${shouldBeActive}`);
       const updated = await prisma.staffLink.update({
         where: { id: link.id },
         data: { isActive: shouldBeActive }
       });
+      console.log(`✅ Link ${link.id} updated`);
       return updated;
     }
     
+    console.log(`✅ Link ${link.id} status is correct`);
     return link;
   } catch (err) {
     console.error('❌ refreshLinkStatus error:', err.message);
-    throw err; // Re-throw to let caller handle it
+    console.error('Stack:', err.stack);
+    throw err;
   }
 }
 
