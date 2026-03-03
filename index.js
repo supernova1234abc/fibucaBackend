@@ -306,6 +306,7 @@ function authenticate(req, res, next) {
 }
 
     function requireRole(roles = []) {
+
   return (req, res, next) => {
     if (!req.user || !roles.includes(req.user.role)) {
       return res.status(403).json({ error: "Forbidden: insufficient role" });
@@ -313,6 +314,214 @@ function authenticate(req, res, next) {
     next();
   };
 }
+
+// =========================
+// ✅ COMPLAINTS (CLIENT + STAFF)
+// =========================
+
+// CLIENT: create complaint
+app.post("/api/complaints", authenticate, async (req, res) => {
+  try {
+    const { subject, message } = req.body;
+
+    if (!subject || !message) {
+      return res.status(400).json({ error: "subject and message are required" });
+    }
+
+    const created = await prisma.complaint.create({
+      data: {
+        userId: req.user.id,
+        subject: String(subject).trim(),
+        message: String(message).trim(),
+      },
+    });
+
+    return res.status(201).json({ message: "✅ Complaint submitted", complaint: created });
+  } catch (err) {
+    console.error("❌ create complaint error:", err);
+    return res.status(500).json({ error: "Failed to submit complaint", details: err.message });
+  }
+});
+
+// CLIENT: list my complaints
+app.get("/api/complaints/mine", authenticate, async (req, res) => {
+  try {
+    const rows = await prisma.complaint.findMany({
+      where: { userId: req.user.id },
+      orderBy: { createdAt: "desc" },
+    });
+    return res.json(rows);
+  } catch (err) {
+    console.error("❌ list my complaints error:", err);
+    return res.status(500).json({ error: "Failed to fetch complaints", details: err.message });
+  }
+});
+
+// STAFF/ADMIN: list all complaints
+app.get(
+  "/api/staff/complaints",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const rows = await prisma.complaint.findMany({
+        include: {
+          user: { select: { id: true, name: true, employeeNumber: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      return res.json(rows);
+    } catch (err) {
+      console.error("❌ staff complaints error:", err);
+      return res.status(500).json({ error: "Failed to fetch complaints", details: err.message });
+    }
+  }
+);
+
+// STAFF/ADMIN: update complaint status
+app.put(
+  "/api/staff/complaints/:id/status",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const { status } = req.body;
+
+      if (!id) return res.status(400).json({ error: "Invalid complaint id" });
+
+      const allowed = ["OPEN", "RESOLVED", "CLOSED"];
+      if (!status || !allowed.includes(status)) {
+        return res.status(400).json({ error: `status must be one of: ${allowed.join(", ")}` });
+      }
+
+      const updated = await prisma.complaint.update({
+        where: { id },
+        data: { status },
+      });
+
+      return res.json({ message: "✅ Status updated", complaint: updated });
+    } catch (err) {
+      console.error("❌ update complaint status error:", err);
+      return res.status(500).json({ error: "Failed to update complaint", details: err.message });
+    }
+  }
+);
+
+// =========================
+// ✅ TRANSFER (change employeeNumber + history)
+// =========================
+
+// ADMIN/STAFF can transfer a CLIENT (bank change etc.)
+app.post(
+  "/api/users/:id/transfer",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      const { newEmployeeNumber, newEmployerName, note } = req.body;
+
+      if (!userId) return res.status(400).json({ error: "Invalid user id" });
+      if (!newEmployeeNumber) return res.status(400).json({ error: "newEmployeeNumber is required" });
+
+      const target = await prisma.user.findUnique({ where: { id: userId } });
+      if (!target) return res.status(404).json({ error: "User not found" });
+
+      // Only transfer CLIENT accounts (optional safety)
+      if (target.role !== "CLIENT") {
+        return res.status(400).json({ error: "Only CLIENT users can be transferred" });
+      }
+
+      // Ensure new employeeNumber is not taken
+      const exists = await prisma.user.findUnique({ where: { employeeNumber: String(newEmployeeNumber) } });
+      if (exists) return res.status(409).json({ error: "newEmployeeNumber already exists" });
+
+      // Also ensure submissions unique constraint doesn't conflict
+      const subExists = await prisma.submission.findUnique({
+        where: { employeeNumber: String(newEmployeeNumber) },
+      });
+      if (subExists) return res.status(409).json({ error: "Submission already exists for newEmployeeNumber" });
+
+      const oldEmployeeNumber = target.employeeNumber;
+
+      // Do everything atomically
+      const result = await prisma.$transaction(async (tx) => {
+        // Create history
+        const history = await tx.transferHistory.create({
+          data: {
+            userId: target.id,
+            performedById: req.user.id,
+            oldEmployerName: null,
+            newEmployerName: newEmployerName ? String(newEmployerName).trim() : null,
+            oldEmployeeNumber: oldEmployeeNumber,
+            newEmployeeNumber: String(newEmployeeNumber).trim(),
+            note: note ? String(note).trim() : null,
+          },
+        });
+
+        // Update User
+        const updatedUser = await tx.user.update({
+          where: { id: target.id },
+          data: {
+            employeeNumber: String(newEmployeeNumber).trim(),
+            username: String(newEmployeeNumber).trim(), // keep username aligned with employeeNumber
+          },
+          select: { id: true, name: true, employeeNumber: true, username: true, role: true },
+        });
+
+        // Update Submission records (client dashboard uses /submissions by employeeNumber)
+        await tx.submission.updateMany({
+          where: { employeeNumber: oldEmployeeNumber },
+          data: { employeeNumber: String(newEmployeeNumber).trim() },
+        });
+
+        return { history, updatedUser };
+      });
+
+      return res.json({
+        message: "✅ Transfer completed",
+        user: result.updatedUser,
+        transfer: result.history,
+      });
+    } catch (err) {
+      console.error("❌ transfer error:", err);
+
+      // Prisma unique errors
+      if (err.code === "P2002") {
+        return res.status(409).json({ error: "Unique constraint failed", details: err.meta });
+      }
+
+      return res.status(500).json({ error: "Transfer failed", details: err.message });
+    }
+  }
+);
+
+// ADMIN/STAFF: view transfer history for a user
+app.get(
+  "/api/users/:id/transfers",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      if (!userId) return res.status(400).json({ error: "Invalid user id" });
+
+      const rows = await prisma.transferHistory.findMany({
+        where: { userId },
+        include: {
+          performedBy: { select: { id: true, name: true, employeeNumber: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      return res.json(rows);
+    } catch (err) {
+      console.error("❌ get transfers error:", err);
+      return res.status(500).json({ error: "Failed to fetch transfer history", details: err.message });
+    }
+  }
+);
 
 
 
