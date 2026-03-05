@@ -1204,27 +1204,24 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
 // ✅ Cloudinary clean URL helper (TRANSPARENT PNG)
 // ========================
 function makeTransparentCleanUrl(publicIdOrUploadResult) {
-  // Accept either an upload result or a string public_id
   const publicId =
-    typeof publicIdOrUploadResult === 'string'
+    typeof publicIdOrUploadResult === "string"
       ? publicIdOrUploadResult
       : publicIdOrUploadResult?.public_id;
 
-  if (!publicId) return '';
+  if (!publicId) return "";
 
-  // IMPORTANT:
-  // - format: "png" enables transparency
-  // - background_removal removes background
-  // - crop pad keeps consistent image bounds WITHOUT filling white
+  // ✅ Transparent PNG background removal
+  // - NO background:"white"
+  // - NO crop pad (pad often introduces matte/flat background)
   return cloudinary.url(publicId, {
+    format: "png",
     transformation: [
       { effect: "background_removal" },
-      { crop: "pad", background: "transparent" }
+      { flags: "preserve_transparency" }
     ],
-    format: "png"
   });
 }
-
 app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   try {
     const { userId, fullName, company, role, cardNumber } = req.body;
