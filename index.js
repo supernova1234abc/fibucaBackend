@@ -93,11 +93,14 @@ async function ensureCloudinaryUrls(card) {
     const pub = getCloudinaryPublicId(card.rawPhotoUrl);
     if (pub) {
       card.cleanPhotoUrl = cloudinary.url(pub, {
-        transformation: [
-          { effect: 'background_removal' },
-          { background: 'white' },
-          { crop: 'pad' }
-        ]
+ transformation: [
+    { effect: "background_removal" },
+    // must be AFTER background_removal (Cloudinary note)
+    { effect: "dropshadow", azimuth: 220, elevation: 40, spread: 20 },
+    { crop: "scale", height: 110 },
+    { fetch_format: "png" }, // keep transparency
+    { quality: "auto" },
+  ]
       });
       await prisma.idCard.update({ where: { id: card.id }, data: { cleanPhotoUrl: card.cleanPhotoUrl } });
     }
@@ -1216,10 +1219,14 @@ function makeTransparentCleanUrl(publicIdOrUploadResult) {
   // - NO crop pad (pad often introduces matte/flat background)
   return cloudinary.url(publicId, {
     format: "png",
-    transformation: [
-      { effect: "background_removal" },
-      { flags: "preserve_transparency" }
-    ],
+ transformation: [
+    { effect: "background_removal" },
+    // must be AFTER background_removal (Cloudinary note)
+    { effect: "dropshadow", azimuth: 220, elevation: 40, spread: 20 },
+    { crop: "scale", height: 110 },
+    { fetch_format: "png" }, // keep transparency
+    { quality: "auto" },
+  ],
   });
 }
 app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, res) => {
