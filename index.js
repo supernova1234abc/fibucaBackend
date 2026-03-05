@@ -1168,16 +1168,6 @@ app.post('/bulk-upload', async (req, res) => {
 });
 
 
-
-/**
- * ✅ POST /api/idcards
- * Create a new ID card
- */
-// Python processing completely removed for Vercel compatibility
-
-
-
-
 // ---------- GET /api/idcards/:userId ----------
 app.get('/api/idcards/:userId', authenticate, async (req, res) => {
   try {
@@ -1210,6 +1200,31 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
   }
 });
 
+// ========================
+// ✅ Cloudinary clean URL helper (TRANSPARENT PNG)
+// ========================
+function makeTransparentCleanUrl(publicIdOrUploadResult) {
+  // Accept either an upload result or a string public_id
+  const publicId =
+    typeof publicIdOrUploadResult === 'string'
+      ? publicIdOrUploadResult
+      : publicIdOrUploadResult?.public_id;
+
+  if (!publicId) return '';
+
+  // IMPORTANT:
+  // - format: "png" enables transparency
+  // - background_removal removes background
+  // - crop pad keeps consistent image bounds WITHOUT filling white
+  return cloudinary.url(publicId, {
+    transformation: [
+      { effect: "background_removal" },
+      { crop: "pad", background: "transparent" }
+    ],
+    format: "png"
+  });
+}
+
 app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   try {
     const { userId, fullName, company, role, cardNumber } = req.body;
@@ -1235,7 +1250,6 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
     let cleanPhotoUrl = '';
 
     if (req.file && req.file.buffer) {
-
       // ====================================================
       // ☁️ CLOUDINARY MODE
       // ====================================================
@@ -1248,31 +1262,16 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
               folder: cloudFolder(CLOUDINARY_FOLDERS.photos),
               resource_type: 'image'
             },
-            (error, result) => error ? reject(error) : resolve(result)
+            (error, result) => (error ? reject(error) : resolve(result))
           );
           streamifier.createReadStream(req.file.buffer).pipe(stream);
         });
 
         rawPhotoUrl = uploadResult.secure_url;
 
-        // AI background removal transformation
-        cleanPhotoUrl = cloudinary.url(uploadResult.public_id, {
-          transformation: [
-            { effect: "background_removal" },
-            { background: "white" },
-            { crop: "pad" }
-          ]
-        });
+        // ✅ Transparent PNG background removal
+        cleanPhotoUrl = makeTransparentCleanUrl(uploadResult);
       }
-
-      // ====================================================
-      // 🖥 VPS MODE (commented out for now)
-      // ====================================================
-      /*
-      if (PHOTO_MODE === "vps") {
-        console.log("🖥 VPS mode is disabled for now");
-      }
-      */
 
       // Update card with photo URLs
       card = await prisma.idCard.update({
@@ -1294,10 +1293,8 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
 
 /**
  * ✅ PUT /api/idcards/:id/photo
- * Upload a raw ID card photo, run Python rembg to remove background, and save both
-* raw and cleaned images to the local `photos/` folder.  Updates DB with local URLs.
-*/
-
+ * Upload a raw ID card photo and generate cleaned version.
+ */
 app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -1306,11 +1303,13 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
 
-    if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
+    if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
       return res.status(403).json({ error: 'Forbidden' });
+    }
 
-    if (!req.file || !req.file.buffer)
+    if (!req.file || !req.file.buffer) {
       return res.status(400).json({ error: 'No photo uploaded' });
+    }
 
     let rawPhotoUrl = '';
     let cleanPhotoUrl = '';
@@ -1327,30 +1326,16 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
             folder: cloudFolder(CLOUDINARY_FOLDERS.photos),
             resource_type: 'image'
           },
-          (error, result) => error ? reject(error) : resolve(result)
+          (error, result) => (error ? reject(error) : resolve(result))
         );
         streamifier.createReadStream(req.file.buffer).pipe(stream);
       });
 
       rawPhotoUrl = uploadResult.secure_url;
 
-      cleanPhotoUrl = cloudinary.url(uploadResult.public_id, {
-        transformation: [
-          { effect: "background_removal" },
-          { background: "white" },
-          { crop: "pad" }
-        ]
-      });
+      // ✅ Transparent PNG background removal
+      cleanPhotoUrl = makeTransparentCleanUrl(uploadResult);
     }
-
-    // ====================================================
-    // 🖥 VPS MODE (commented out)
-    // ====================================================
-    /*
-    if (PHOTO_MODE === "vps") {
-      console.log("🖥 VPS mode is disabled for now");
-    }
-    */
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
@@ -1387,20 +1372,9 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
         throw new Error(`Unable to parse public_id from url ${card.rawPhotoUrl}`);
       }
 
-      cleanPhotoUrl = cloudinary.url(publicId, {
-        transformation: [
-          { effect: "background_removal" },
-          { background: "white" },
-          { crop: "pad" }
-        ]
-      });
+      // ✅ Transparent PNG background removal
+      cleanPhotoUrl = makeTransparentCleanUrl(publicId);
     }
-
-    /*
-    if (PHOTO_MODE === "vps") {
-      console.log("🖥 VPS mode is disabled for now");
-    }
-    */
 
     const updatedCard = await prisma.idCard.update({
       where: { id },
@@ -1426,8 +1400,10 @@ app.delete('/api/idcards/:id', authenticate, async (req, res) => {
 
     const card = await prisma.idCard.findUnique({ where: { id } });
     if (!card) return res.status(404).json({ error: 'ID card not found' });
-    if (req.user.role === 'CLIENT' && req.user.id !== card.userId)
+
+    if (req.user.role === 'CLIENT' && req.user.id !== card.userId) {
       return res.status(403).json({ error: 'Forbidden' });
+    }
 
     await prisma.idCard.delete({ where: { id } });
     res.json({ message: '✅ ID card deleted' });
