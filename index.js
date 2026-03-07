@@ -10,6 +10,8 @@ const bcrypt = require('bcrypt')
 const IS_VERCEL = !!process.env.VERCEL;
 const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
+const pdfParse = require("pdf-parse");
+const Tesseract = require("tesseract.js");
 const streamifier = require('streamifier') // ✅ const import style
 const { v2: cloudinary } = require('cloudinary');
 // Configure Cloudinary
@@ -318,6 +320,295 @@ function authenticate(req, res, next) {
   };
 }
 
+
+function normalizeSpaces(value = "") {
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function extractField(text, patterns = []) {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) return normalizeSpaces(match[1]);
+  }
+  return "";
+}
+
+function parseScannedFormText(rawText = "") {
+  const text = String(rawText || "").replace(/\r/g, "");
+  const lines = text
+    .split("\n")
+    .map((l) => normalizeSpaces(l))
+    .filter(Boolean);
+
+  const fullText = lines.join("\n");
+
+  const employeeName = extractField(fullText, [
+    /EMPLOYEE['’]?\s*NAME\s*[:\-]?\s*(.+)/i,
+    /NAME\s*[:\-]?\s*(.+)/i,
+  ]);
+
+  const employeeNumber = extractField(fullText, [
+    /EMPLOYEE\s*NUMBER\s*[:\-]?\s*([A-Z0-9\/\-]+)/i,
+    /EMPLOYEE\s*NO\.?\s*[:\-]?\s*([A-Z0-9\/\-]+)/i,
+    /PAYROLL\s*NUMBER\s*[:\-]?\s*([A-Z0-9\/\-]+)/i,
+  ]);
+
+  const employerName = extractField(fullText, [
+    /EMPLOYER\s*NAME\s*[:\-]?\s*(.+)/i,
+    /BANK\s*NAME\s*[:\-]?\s*(.+)/i,
+    /EMPLOYER\s*[:\-]?\s*(.+)/i,
+  ]);
+
+  const branchName = extractField(fullText, [
+    /BRANCH\s*NAME\s*[:\-]?\s*(.+)/i,
+    /BRANCH\s*[:\-]?\s*(.+)/i,
+  ]);
+
+  const phoneNumber = extractField(fullText, [
+    /PHONE\s*NUMBER\s*[:\-]?\s*([+0-9][0-9\s\-]{7,})/i,
+    /PHONE\s*[:\-]?\s*([+0-9][0-9\s\-]{7,})/i,
+    /MOBILE\s*[:\-]?\s*([+0-9][0-9\s\-]{7,})/i,
+    /TEL\s*[:\-]?\s*([+0-9][0-9\s\-]{7,})/i,
+  ]);
+
+  const dues = extractField(fullText, [
+    /INITIAL\s*MONTHLY\s*UNION\s*DUES\s*[:\-]?\s*([0-9]+%?)/i,
+    /DUES\s*[:\-]?\s*([0-9]+%?)/i,
+  ]) || "1%";
+
+  const witness = extractField(fullText, [
+    /WITNESS\s*NAME\s*AND\s*SIGNATURE\s*[:\-]?\s*(.+)/i,
+    /WITNESS\s*[:\-]?\s*(.+)/i,
+  ]);
+
+  const scoreParts = [
+    employeeName,
+    employeeNumber,
+    employerName,
+    dues,
+    witness,
+  ].filter(Boolean).length;
+
+  const confidence = Math.min(0.25 + scoreParts * 0.15, 0.95);
+
+  return {
+    employeeName,
+    employeeNumber,
+    employerName,
+    branchName,
+    phoneNumber,
+    dues: dues || "1%",
+    witness,
+    confidence,
+    rawText: fullText,
+  };
+}
+
+async function extractTextFromUpload(file) {
+  const mime = file.mimetype || "";
+  const isPdf = mime.includes("pdf");
+  const isImage = mime.startsWith("image/");
+
+  if (isPdf) {
+    try {
+      const parsed = await pdfParse(file.buffer);
+      const text = normalizeSpaces(parsed?.text || "");
+      if (text && text.length > 40) {
+        return { text: parsed.text || "", source: "pdf-text" };
+      }
+    } catch (err) {
+      console.warn("⚠️ pdf-parse failed, falling back to OCR:", err.message);
+    }
+
+    // For scanned PDFs, MVP fallback:
+    // Ask user to upload image version if OCR on PDF pages is not yet implemented.
+    throw new Error("This PDF appears to be scanned/image-only. For the MVP, please upload a JPG or PNG scan of the form page.");
+  }
+
+  if (isImage) {
+    const worker = await Tesseract.createWorker("eng");
+    try {
+      const result = await worker.recognize(file.buffer);
+      return {
+        text: result?.data?.text || "",
+        source: "ocr-image",
+      };
+    } finally {
+      await worker.terminate();
+    }
+  }
+
+  throw new Error("Unsupported file type. Please upload PDF, JPG, JPEG, or PNG.");
+}
+
+// =========================
+// ✅ SCAN PAPER FORM (MVP)
+// =========================
+
+// OCR / text extraction preview
+app.post(
+  "/api/forms/scan",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  uploadPDF.single("file"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      const extracted = await extractTextFromUpload(req.file);
+      const parsed = parseScannedFormText(extracted.text);
+
+      return res.json({
+        message: "✅ Scan processed",
+        source: extracted.source,
+        extractedData: {
+          employeeName: parsed.employeeName || "",
+          employeeNumber: parsed.employeeNumber || "",
+          employerName: parsed.employerName || "",
+          branchName: parsed.branchName || "",
+          phoneNumber: parsed.phoneNumber || "",
+          dues: parsed.dues || "1%",
+          witness: parsed.witness || "",
+        },
+        confidence: parsed.confidence,
+        rawText: parsed.rawText,
+      });
+    } catch (err) {
+      console.error("❌ scan form error:", err);
+      return res.status(500).json({
+        error: "Failed to scan form",
+        details: err.message,
+      });
+    }
+  }
+);
+
+// Save reviewed scan into Submission table
+app.post(
+  "/api/forms/scan/save",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const {
+        employeeName,
+        employeeNumber,
+        employerName,
+        branchName,
+        phoneNumber,
+        dues,
+        witness,
+      } = req.body;
+
+      if (!employeeName || !employeeNumber || !employerName || !witness) {
+        return res.status(400).json({
+          error: "employeeName, employeeNumber, employerName and witness are required",
+        });
+      }
+
+      const exists = await prisma.submission.findUnique({
+        where: { employeeNumber: String(employeeNumber).trim() },
+      });
+
+      if (exists) {
+        return res.status(409).json({
+          error: "Submission already exists for this employee number",
+        });
+      }
+
+      const submission = await prisma.submission.create({
+        data: {
+          employeeName: String(employeeName).trim(),
+          employeeNumber: String(employeeNumber).trim(),
+          employerName: String(employerName).trim(),
+          branchName: branchName ? String(branchName).trim() : null,
+          phoneNumber: phoneNumber ? String(phoneNumber).trim() : null,
+          dues: dues ? String(dues).trim() : "1%",
+          witness: String(witness).trim(),
+          pdfPath: null, // requires pdfPath String? in schema
+          submittedAt: new Date(),
+          staffId: req.user.id,
+        },
+      });
+
+      let user = await prisma.user.findUnique({
+        where: { employeeNumber: String(employeeNumber).trim() },
+      });
+
+      let tempPassword = null;
+
+      if (!user) {
+        const suffix = Math.floor(1000 + Math.random() * 9000);
+        tempPassword = `${String(employeeNumber).trim()}${suffix}`;
+        const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+        user = await prisma.user.create({
+          data: {
+            name: String(employeeName).trim(),
+            username: String(employeeNumber).trim(),
+            employeeNumber: String(employeeNumber).trim(),
+            email: `${String(employeeNumber).trim()}@fibuca.com`,
+            password: hashedPassword,
+            role: "CLIENT",
+          },
+        });
+      }
+
+      let placeholderCard = await prisma.idCard.findFirst({
+        where: { userId: user.id },
+      });
+
+      const makeCardNumber = () => {
+        const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        const prefix = Array.from({ length: 2 })
+          .map(() => letters[Math.floor(Math.random() * letters.length)])
+          .join("");
+        const digits = Math.floor(100000 + Math.random() * 900000);
+        return `FIBUCA${prefix}${digits}`;
+      };
+
+      if (!placeholderCard) {
+        placeholderCard = await prisma.idCard.create({
+          data: {
+            userId: user.id,
+            fullName: user.name,
+            rawPhotoUrl: "",
+            cleanPhotoUrl: "",
+            company: submission.employerName,
+            role: "Member",
+            issuedAt: new Date(),
+            cardNumber: makeCardNumber(),
+          },
+        });
+      }
+
+      return res.status(201).json({
+        message: "✅ Scanned form saved successfully",
+        submission,
+        user: {
+          id: user.id,
+          name: user.name,
+          employeeNumber: user.employeeNumber,
+          role: user.role,
+        },
+        loginCredentials: tempPassword
+          ? { username: user.username, password: tempPassword }
+          : null,
+        idCard: placeholderCard,
+      });
+    } catch (err) {
+      console.error("❌ save scanned form error:", err);
+      return res.status(500).json({
+        error: "Failed to save scanned form",
+        details: err.message,
+      });
+    }
+  }
+);
+
+
 // =========================
 // ✅ COMPLAINTS (CLIENT + STAFF)
 // =========================
@@ -423,7 +714,7 @@ app.post(
   async (req, res) => {
     try {
       const userId = Number(req.params.id);
-      const { newEmployeeNumber, newEmployerName, note } = req.body;
+      const { newEmployeeNumber, newEmployerName, newBranchName, newPhoneNumber, note } = req.body;
 
       if (!userId) return res.status(400).json({ error: "Invalid user id" });
       if (!newEmployeeNumber) return res.status(400).json({ error: "newEmployeeNumber is required" });
@@ -675,6 +966,63 @@ app.get('/api/submissions/:employeeNumber', authenticate, async (req, res) => {
   }
 });
 
+app.get(
+  "/api/submissions/search",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const { employerName, branchName, employeeName, employeeNumber, phoneNumber } = req.query;
+
+      const where = {};
+
+      if (employerName) {
+        where.employerName = {
+          contains: String(employerName).trim(),
+          mode: "insensitive",
+        };
+      }
+
+      if (branchName) {
+        where.branchName = {
+          contains: String(branchName).trim(),
+          mode: "insensitive",
+        };
+      }
+
+      if (employeeName) {
+        where.employeeName = {
+          contains: String(employeeName).trim(),
+          mode: "insensitive",
+        };
+      }
+
+      if (employeeNumber) {
+        where.employeeNumber = {
+          contains: String(employeeNumber).trim(),
+          mode: "insensitive",
+        };
+      }
+
+      if (phoneNumber) {
+        where.phoneNumber = {
+          contains: String(phoneNumber).trim(),
+          mode: "insensitive",
+        };
+      }
+
+      const rows = await prisma.submission.findMany({
+        where,
+        orderBy: { submittedAt: "desc" },
+      });
+
+      return res.json(rows);
+    } catch (err) {
+      console.error("❌ submission search error:", err);
+      return res.status(500).json({ error: "Failed to search submissions", details: err.message });
+    }
+  }
+);
 
 // ---------- POST /submit-form ----------
 
@@ -752,17 +1100,19 @@ if (!updatedLink || !updatedLink.isActive) {
 
     // 5️⃣ Create new submission
     const submission = await prisma.submission.create({
-      data: {
-        employeeName: form.employeeName,
-        employeeNumber: form.employeeNumber,
-        employerName: form.employerName,
-        dues: form.dues,
-        witness: form.witness,
-        pdfPath: pdfUrl,
-        submittedAt: new Date(),
-        staffId: updatedLink.staffId,
-      },
-    });
+    data: {
+    employeeName: form.employeeName,
+    employeeNumber: form.employeeNumber,
+    phoneNumber: form.phoneNumber ? String(form.phoneNumber).trim() : null,
+    employerName: form.employerName,
+    branchName: form.branchName ? String(form.branchName).trim() : null,
+    dues: form.dues,
+    witness: form.witness,
+    pdfPath: pdfUrl,
+    submittedAt: new Date(),
+    staffId: updatedLink.staffId,
+  },
+});
 
 
     //increment link usage
@@ -1148,20 +1498,23 @@ app.post('/bulk-upload', async (req, res) => {
       return res.status(400).json({ error: 'Invalid data format' });
     }
 
-    const saved = await prisma.$transaction(
-      records.map(record =>
-        prisma.submission.create({
-          data: {
-            employeeName: record.employeeName || '',
-            employeeNumber: record.employeeNumber || '',
-            employerName: record.employerName || '',
-            dues: record.dues || '1%',
-            witness: record.witness || '',
-            submittedAt: new Date()
-          }
-        })
-      )
-    );
+const saved = await prisma.$transaction(
+  records.map(record =>
+    prisma.submission.create({
+      data: {
+        employeeName: record.employeeName || '',
+        employeeNumber: record.employeeNumber || '',
+        phoneNumber: record.phoneNumber || record.phone || null,
+        employerName: record.employerName || '',
+        branchName: record.branchName || record.branch || null,
+        dues: record.dues || '1%',
+        witness: record.witness || '',
+        pdfPath: record.pdfPath || '',
+        submittedAt: new Date()
+      }
+    })
+  )
+);
 
     res.status(200).json({ message: 'Bulk upload successful', count: saved.length });
   } catch (err) {
@@ -1683,7 +2036,7 @@ app.put('/submissions/:id', authenticate, async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' })
   }
 
-  const { employeeName, employeeNumber, employerName, dues, witness } = req.body
+  const { employeeName, employeeNumber, employerName, branchName, phoneNumber, dues, witness } = req.body
   try {
     const updated = await prisma.submission.update({
       where: { id },
@@ -1691,6 +2044,8 @@ app.put('/submissions/:id', authenticate, async (req, res) => {
         employeeName: employeeName ?? undefined,
         employeeNumber: employeeNumber ?? undefined,
         employerName: employerName ?? undefined,
+        branchName: branchName ?? undefined,
+        phoneNumber: phoneNumber ?? undefined,
         dues: dues ?? undefined,
         witness: witness ?? undefined
       }
