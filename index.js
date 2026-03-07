@@ -95,14 +95,14 @@ async function ensureCloudinaryUrls(card) {
     const pub = getCloudinaryPublicId(card.rawPhotoUrl);
     if (pub) {
       card.cleanPhotoUrl = cloudinary.url(pub, {
- transformation: [
-    { effect: "background_removal" },
-    // must be AFTER background_removal (Cloudinary note)
-    { effect: "dropshadow", azimuth: 220, elevation: 40, spread: 20 },
-    { crop: "scale", height: 110 },
-    { fetch_format: "png" }, // keep transparency
-    { quality: "auto" },
-  ]
+        transformation: [
+          { effect: "background_removal" },
+          // must be AFTER background_removal (Cloudinary note)
+          { effect: "dropshadow", azimuth: 220, elevation: 40, spread: 20 },
+          { crop: "scale", height: 110 },
+          { fetch_format: "png" }, // keep transparency
+          { quality: "auto" },
+        ]
       });
       await prisma.idCard.update({ where: { id: card.id }, data: { cleanPhotoUrl: card.cleanPhotoUrl } });
     }
@@ -143,7 +143,7 @@ async function refreshLinkStatus(link) {
     }
 
     const now = new Date();
-    
+
     // Safety check: expiresAt should be a valid Date
     let expiresAt = link.expiresAt;
     if (!expiresAt) {
@@ -152,13 +152,13 @@ async function refreshLinkStatus(link) {
     } else if (typeof expiresAt === 'string') {
       expiresAt = new Date(expiresAt);
     }
-    
+
     const isExpired = expiresAt < now;
     // Safely check maxUses and usedCount (might not exist in old DB records)
     const maxUses = link.maxUses || null;
     const usedCount = link.usedCount || 0;
     const isMaxedOut = maxUses && usedCount >= maxUses;
-    
+
     // Link should be active only if NOT expired and NOT maxed out
     const shouldBeActive = !isExpired && !isMaxedOut;
 
@@ -180,7 +180,7 @@ async function refreshLinkStatus(link) {
         return { ...link, isActive: shouldBeActive };
       }
     }
-    
+
     console.log(`✅ Link ${link.id} status is current (no update needed)`);
     return link;
   } catch (err) {
@@ -310,7 +310,7 @@ function authenticate(req, res, next) {
   }
 }
 
-    function requireRole(roles = []) {
+function requireRole(roles = []) {
 
   return (req, res, next) => {
     if (!req.user || !roles.includes(req.user.role)) {
@@ -1029,27 +1029,27 @@ app.get(
 app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
   try {
 
-      const { token } = req.params;
+    const { token } = req.params;
 
-let link = await prisma.staffLink.findUnique({
-  where: { token },
-});
+    let link = await prisma.staffLink.findUnique({
+      where: { token },
+    });
 
-if (!link) {
-  return res.status(400).json({ error: "Invalid link" });
-}
+    if (!link) {
+      return res.status(400).json({ error: "Invalid link" });
+    }
 
-let updatedLink = link;
-try {
-  updatedLink = await refreshLinkStatus(link);
-} catch (err) {
-  console.error('❌ Failed to refresh link status:', err.message);
-  updatedLink = link; // Use original if refresh fails
-}
+    let updatedLink = link;
+    try {
+      updatedLink = await refreshLinkStatus(link);
+    } catch (err) {
+      console.error('❌ Failed to refresh link status:', err.message);
+      updatedLink = link; // Use original if refresh fails
+    }
 
-if (!updatedLink || !updatedLink.isActive) {
-  return res.status(400).json({ error: "Link expired or inactive" });
-}
+    if (!updatedLink || !updatedLink.isActive) {
+      return res.status(400).json({ error: "Link expired or inactive" });
+    }
 
 
     // 1️⃣ Parse form JSON from frontend
@@ -1100,23 +1100,23 @@ if (!updatedLink || !updatedLink.isActive) {
 
     // 5️⃣ Create new submission
     const submission = await prisma.submission.create({
-    data: {
-    employeeName: form.employeeName,
-    employeeNumber: form.employeeNumber,
-    phoneNumber: form.phoneNumber ? String(form.phoneNumber).trim() : null,
-    employerName: form.employerName,
-    branchName: form.branchName ? String(form.branchName).trim() : null,
-    dues: form.dues,
-    witness: form.witness,
-    pdfPath: pdfUrl,
-    submittedAt: new Date(),
-    staffId: updatedLink.staffId,
-  },
-});
+      data: {
+        employeeName: form.employeeName,
+        employeeNumber: form.employeeNumber,
+        phoneNumber: form.phoneNumber ? String(form.phoneNumber).trim() : null,
+        employerName: form.employerName,
+        branchName: form.branchName ? String(form.branchName).trim() : null,
+        dues: form.dues,
+        witness: form.witness,
+        pdfPath: pdfUrl,
+        submittedAt: new Date(),
+        staffId: updatedLink.staffId,
+      },
+    });
 
 
     //increment link usage
-    await prisma.staffLink.update({ 
+    await prisma.staffLink.update({
       where: { id: updatedLink.id },
       data: { usedCount: { increment: 1 } }
     });
@@ -1217,12 +1217,12 @@ app.post(
 
       // Generate frontend URL with simplified fallback
       let frontendUrl = process.env.VITE_FRONTEND_URL;
-      
+
       // If env var not set and on Vercel, use production URL
       if (!frontendUrl && process.env.VERCEL) {
         frontendUrl = 'https://fibuca-frontend.vercel.app';
       }
-      
+
       // Otherwise use request origin for local development
       if (!frontendUrl) {
         frontendUrl = `${req.protocol}://${req.get('host')}`;
@@ -1267,7 +1267,7 @@ app.get("/api/staff/validate/:token", async (req, res) => {
     }
 
     if (!link) {
-      console.warn(`❌ Link not found for token: ${token.substring(0,16)}...`);
+      console.warn(`❌ Link not found for token: ${token.substring(0, 16)}...`);
       return res.status(400).json({ error: "Invalid link" });
     }
 
@@ -1498,23 +1498,23 @@ app.post('/bulk-upload', async (req, res) => {
       return res.status(400).json({ error: 'Invalid data format' });
     }
 
-const saved = await prisma.$transaction(
-  records.map(record =>
-    prisma.submission.create({
-      data: {
-        employeeName: record.employeeName || '',
-        employeeNumber: record.employeeNumber || '',
-        phoneNumber: record.phoneNumber || record.phone || null,
-        employerName: record.employerName || '',
-        branchName: record.branchName || record.branch || null,
-        dues: record.dues || '1%',
-        witness: record.witness || '',
-        pdfPath: record.pdfPath || '',
-        submittedAt: new Date()
-      }
-    })
-  )
-);
+    const saved = await prisma.$transaction(
+      records.map(record =>
+        prisma.submission.create({
+          data: {
+            employeeName: record.employeeName || '',
+            employeeNumber: record.employeeNumber || '',
+            phoneNumber: record.phoneNumber || record.phone || null,
+            employerName: record.employerName || '',
+            branchName: record.branchName || record.branch || null,
+            dues: record.dues || '1%',
+            witness: record.witness || '',
+            pdfPath: record.pdfPath || '',
+            submittedAt: new Date()
+          }
+        })
+      )
+    );
 
     res.status(200).json({ message: 'Bulk upload successful', count: saved.length });
   } catch (err) {
@@ -1572,14 +1572,14 @@ function makeTransparentCleanUrl(publicIdOrUploadResult) {
   // - NO crop pad (pad often introduces matte/flat background)
   return cloudinary.url(publicId, {
     format: "png",
- transformation: [
-    { effect: "background_removal" },
-    // must be AFTER background_removal (Cloudinary note)
-    { effect: "dropshadow", azimuth: 220, elevation: 40, spread: 20 },
-    { crop: "scale", height: 110 },
-    { fetch_format: "png" }, // keep transparency
-    { quality: "auto" },
-  ],
+    transformation: [
+      { effect: "background_removal" },
+      // must be AFTER background_removal (Cloudinary note)
+      { effect: "dropshadow", azimuth: 220, elevation: 40, spread: 20 },
+      { crop: "scale", height: 110 },
+      { fetch_format: "png" }, // keep transparency
+      { quality: "auto" },
+    ],
   });
 }
 app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, res) => {
@@ -1773,194 +1773,194 @@ app.delete('/api/idcards/:id', authenticate, async (req, res) => {
 // GET   /api/admin/users
 // List all users (omit password)
 
-app.get('/api/admin/users', 
-  authenticate, requireRole(['ADMIN','SUPERADMIN']),async (req, res) => {
-  try {
-    const users = await prisma.user.findMany({
-      select: {
-        id: true,
-        name: true,
-        username: true,
-        email: true,
-        employeeNumber: true,
-        role: true,
-        firstLogin: true,
-        createdAt: true
-      },
-      orderBy: { createdAt: 'desc' }
-    })
-    res.json(users)
-  } catch (err) {
-    console.error('❌ GET /api/admin/users error:', err)
-    res.status(500).json({ error: 'Failed to fetch users' })
-  }
-})
+app.get('/api/admin/users',
+  authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+    try {
+      const users = await prisma.user.findMany({
+        select: {
+          id: true,
+          name: true,
+          username: true,
+          email: true,
+          employeeNumber: true,
+          role: true,
+          firstLogin: true,
+          createdAt: true
+        },
+        orderBy: { createdAt: 'desc' }
+      })
+      res.json(users)
+    } catch (err) {
+      console.error('❌ GET /api/admin/users error:', err)
+      res.status(500).json({ error: 'Failed to fetch users' })
+    }
+  })
 
 // ——————————————————————————
 // POST  /api/admin/users
 // Create a new user
-app.post('/api/admin/users', 
-  authenticate, requireRole(['ADMIN','SUPERADMIN']), async (req, res) => {
-  const { name, username, email, password, role, employeeNumber } = req.body
+app.post('/api/admin/users',
+  authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+    const { name, username, email, password, role, employeeNumber } = req.body
 
-  if (!name || !username || !password || !employeeNumber) {
-    return res.status(400).json({
-      error: 'name, username, password and employeeNumber are required'
-    })
-  }
-
-  try {
-    // ensure username & employeeNumber are unique
-    const conflict = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { username },
-          { employeeNumber }
-        ]
-      }
-    })
-    if (conflict) {
-      return res
-        .status(409)
-        .json({ error: 'username or employeeNumber already in use' })
+    if (!name || !username || !password || !employeeNumber) {
+      return res.status(400).json({
+        error: 'name, username, password and employeeNumber are required'
+      })
     }
 
-    // hash the password
-    const hash = await bcrypt.hash(password, 10)
-
-    const user = await prisma.user.create({
-      data: {
-        name,
-        username,
-        email,
-        password: hash,
-        role: role || 'CLIENT',
-        employeeNumber
-      },
-      select: {
-        id: true,
-        name: true,
-        username: true,
-        email: true,
-        employeeNumber: true,
-        role: true,
-        firstLogin: true,
-        createdAt: true
+    try {
+      // ensure username & employeeNumber are unique
+      const conflict = await prisma.user.findFirst({
+        where: {
+          OR: [
+            { username },
+            { employeeNumber }
+          ]
+        }
+      })
+      if (conflict) {
+        return res
+          .status(409)
+          .json({ error: 'username or employeeNumber already in use' })
       }
-    })
 
-    res.status(201).json(user)
-  } catch (err) {
-    console.error('❌ POST /api/admin/users error:', err)
-    res.status(500).json({ error: 'Failed to create user' })
-  }
-})
+      // hash the password
+      const hash = await bcrypt.hash(password, 10)
+
+      const user = await prisma.user.create({
+        data: {
+          name,
+          username,
+          email,
+          password: hash,
+          role: role || 'CLIENT',
+          employeeNumber
+        },
+        select: {
+          id: true,
+          name: true,
+          username: true,
+          email: true,
+          employeeNumber: true,
+          role: true,
+          firstLogin: true,
+          createdAt: true
+        }
+      })
+
+      res.status(201).json(user)
+    } catch (err) {
+      console.error('❌ POST /api/admin/users error:', err)
+      res.status(500).json({ error: 'Failed to create user' })
+    }
+  })
 
 // ——————————————————————————
 // PUT   /api/admin/users/:id
 // Update name, email, role or employeeNumber
-app.put('/api/admin/users/:id', 
-  authenticate, requireRole(['ADMIN','SUPERADMIN']), async (req, res) => {
-  const { id } = req.params
-  const { name, email, role, employeeNumber } = req.body
+app.put('/api/admin/users/:id',
+  authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+    const { id } = req.params
+    const { name, email, role, employeeNumber } = req.body
 
-  try {
-    const existing = await prisma.user.findUnique({
-      where: { id: Number(id) }
-    })
-    if (!existing) {
-      return res.status(404).json({ error: 'User not found' })
-    }
-
-    // if employeeNumber changed, check uniqueness
-    if (employeeNumber && employeeNumber !== existing.employeeNumber) {
-      const dup = await prisma.user.findUnique({
-        where: { employeeNumber }
+    try {
+      const existing = await prisma.user.findUnique({
+        where: { id: Number(id) }
       })
-      if (dup) {
-        return res
-          .status(409)
-          .json({ error: 'employeeNumber already in use' })
+      if (!existing) {
+        return res.status(404).json({ error: 'User not found' })
       }
+
+      // if employeeNumber changed, check uniqueness
+      if (employeeNumber && employeeNumber !== existing.employeeNumber) {
+        const dup = await prisma.user.findUnique({
+          where: { employeeNumber }
+        })
+        if (dup) {
+          return res
+            .status(409)
+            .json({ error: 'employeeNumber already in use' })
+        }
+      }
+
+      const updated = await prisma.user.update({
+        where: { id: Number(id) },
+        data: {
+          name: name ?? existing.name,
+          email: email ?? existing.email,
+          role: role ?? existing.role,
+          employeeNumber: employeeNumber ?? existing.employeeNumber
+        },
+        select: {
+          id: true,
+          name: true,
+          username: true,
+          email: true,
+          employeeNumber: true,
+          role: true,
+          firstLogin: true,
+          createdAt: true
+        }
+      })
+
+      res.json(updated)
+    } catch (err) {
+      console.error(`❌ PUT /api/admin/users/${id} error:`, err)
+      res.status(500).json({ error: 'Failed to update user' })
     }
-
-    const updated = await prisma.user.update({
-      where: { id: Number(id) },
-      data: {
-        name: name ?? existing.name,
-        email: email ?? existing.email,
-        role: role ?? existing.role,
-        employeeNumber: employeeNumber ?? existing.employeeNumber
-      },
-      select: {
-        id: true,
-        name: true,
-        username: true,
-        email: true,
-        employeeNumber: true,
-        role: true,
-        firstLogin: true,
-        createdAt: true
-      }
-    })
-
-    res.json(updated)
-  } catch (err) {
-    console.error(`❌ PUT /api/admin/users/${id} error:`, err)
-    res.status(500).json({ error: 'Failed to update user' })
-  }
-})
+  })
 // ——————————————————————————
 // DELETE /api/admin/users/:id
 // Delete a user by ID (supports cascade or soft delete)
-app.delete('/api/admin/users/:id', 
-  authenticate, requireRole(['ADMIN','SUPERADMIN']), async (req, res) => {
-  const id = Number(req.params.id);
-  if (isNaN(id)) return res.status(400).json({ error: 'Invalid user ID' });
+app.delete('/api/admin/users/:id',
+  authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid user ID' });
 
-  try {
-    const existing = await prisma.user.findUnique({
-      where: { id },
-      include: {
-        idCards: true,
-        submissions: true
-      }
-    });
-
-    if (!existing) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    // Optional soft delete: uncomment if using deletedAt
-    /*
-    await prisma.user.update({
-      where: { id },
-      data: { deletedAt: new Date() }
-    });
-    return res.json({ message: 'User soft-deleted successfully', id });
-    */
-
-    // Hard delete (with cascade on IdCards & Submissions if schema is updated)
-    await prisma.user.delete({
-      where: { id }
-    });
-
-    console.log(`✅ User ${id} deleted. Cascade removed ${existing.idCards.length} idCards and ${existing.submissions.length} submissions.`);
-
-    res.json({ message: 'User deleted successfully', id });
-  } catch (err) {
-    console.error(`❌ DELETE /api/admin/users/${id} error:`, err);
-
-    // Detect FK error (for safety if cascade is missing)
-    if (err.code === 'P2003') {
-      return res.status(409).json({
-        error: 'Cannot delete user: dependent records exist. Enable cascade deletes or use soft delete.'
+    try {
+      const existing = await prisma.user.findUnique({
+        where: { id },
+        include: {
+          idCards: true,
+          submissions: true
+        }
       });
-    }
 
-    res.status(500).json({ error: 'Failed to delete user', details: err.message });
-  }
-});
+      if (!existing) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Optional soft delete: uncomment if using deletedAt
+      /*
+      await prisma.user.update({
+        where: { id },
+        data: { deletedAt: new Date() }
+      });
+      return res.json({ message: 'User soft-deleted successfully', id });
+      */
+
+      // Hard delete (with cascade on IdCards & Submissions if schema is updated)
+      await prisma.user.delete({
+        where: { id }
+      });
+
+      console.log(`✅ User ${id} deleted. Cascade removed ${existing.idCards.length} idCards and ${existing.submissions.length} submissions.`);
+
+      res.json({ message: 'User deleted successfully', id });
+    } catch (err) {
+      console.error(`❌ DELETE /api/admin/users/${id} error:`, err);
+
+      // Detect FK error (for safety if cascade is missing)
+      if (err.code === 'P2003') {
+        return res.status(409).json({
+          error: 'Cannot delete user: dependent records exist. Enable cascade deletes or use soft delete.'
+        });
+      }
+
+      res.status(500).json({ error: 'Failed to delete user', details: err.message });
+    }
+  });
 
 app.get(
   "/api/admin/staff-performance",
@@ -2028,6 +2028,73 @@ app.get('/submissions', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch submissions' })
   }
 })
+
+app.get(
+  "/api/admin/submissions/search",
+  authenticate,
+  requireRole(["ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const {
+        employerName,
+        branchName,
+        employeeName,
+        employeeNumber,
+        phoneNumber,
+      } = req.query;
+
+      const where = {};
+
+      if (employerName) {
+        where.employerName = {
+          contains: String(employerName).trim(),
+          mode: "insensitive",
+        };
+      }
+
+      if (branchName) {
+        where.branchName = {
+          contains: String(branchName).trim(),
+          mode: "insensitive",
+        };
+      }
+
+      if (employeeName) {
+        where.employeeName = {
+          contains: String(employeeName).trim(),
+          mode: "insensitive",
+        };
+      }
+
+      if (employeeNumber) {
+        where.employeeNumber = {
+          contains: String(employeeNumber).trim(),
+          mode: "insensitive",
+        };
+      }
+
+      if (phoneNumber) {
+        where.phoneNumber = {
+          contains: String(phoneNumber).trim(),
+          mode: "insensitive",
+        };
+      }
+
+      const rows = await prisma.submission.findMany({
+        where,
+        orderBy: { submittedAt: "desc" },
+      });
+
+      res.json(rows);
+    } catch (err) {
+      console.error("❌ admin submission search error:", err);
+      res.status(500).json({
+        error: "Failed to search submissions",
+        details: err.message,
+      });
+    }
+  }
+);
 
 // PUT /submissions/:id -> update submission (admin only)
 app.put('/submissions/:id', authenticate, async (req, res) => {
