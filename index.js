@@ -656,12 +656,30 @@ app.get("/api/complaints/mine", authenticate, async (req, res) => {
   try {
     const rows = await prisma.complaint.findMany({
       where: { userId: req.user.id },
+      include: {
+        replies: {
+          include: {
+            sender: {
+              select: {
+                id: true,
+                name: true,
+                role: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
       orderBy: { createdAt: "desc" },
     });
+
     return res.json(rows);
   } catch (err) {
     console.error("❌ list my complaints error:", err);
-    return res.status(500).json({ error: "Failed to fetch complaints", details: err.message });
+    return res.status(500).json({
+      error: "Failed to fetch complaints",
+      details: err.message,
+    });
   }
 });
 
