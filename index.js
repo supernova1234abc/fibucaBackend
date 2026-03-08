@@ -714,60 +714,106 @@ app.post(
   async (req, res) => {
     try {
       const userId = Number(req.params.id);
-      const { newEmployeeNumber, newEmployerName, newBranchName, newPhoneNumber, note } = req.body;
+      const {
+        newEmployeeNumber,
+        newEmployerName,
+        newBranchName,
+        newPhoneNumber,
+        note,
+      } = req.body;
 
-      if (!userId) return res.status(400).json({ error: "Invalid user id" });
-      if (!newEmployeeNumber) return res.status(400).json({ error: "newEmployeeNumber is required" });
+      if (!userId) {
+        return res.status(400).json({ error: "Invalid user id" });
+      }
 
-      const target = await prisma.user.findUnique({ where: { id: userId } });
-      if (!target) return res.status(404).json({ error: "User not found" });
+      if (!newEmployeeNumber) {
+        return res.status(400).json({ error: "newEmployeeNumber is required" });
+      }
 
-      // Only transfer CLIENT accounts (optional safety)
+      const target = await prisma.user.findUnique({
+        where: { id: userId },
+      });
+
+      if (!target) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
       if (target.role !== "CLIENT") {
         return res.status(400).json({ error: "Only CLIENT users can be transferred" });
       }
 
-      // Ensure new employeeNumber is not taken
-      const exists = await prisma.user.findUnique({ where: { employeeNumber: String(newEmployeeNumber) } });
-      if (exists) return res.status(409).json({ error: "newEmployeeNumber already exists" });
-
-      // Also ensure submissions unique constraint doesn't conflict
-      const subExists = await prisma.submission.findUnique({
-        where: { employeeNumber: String(newEmployeeNumber) },
+      const existingSubmission = await prisma.submission.findFirst({
+        where: { employeeNumber: target.employeeNumber },
+        orderBy: { submittedAt: "desc" },
       });
-      if (subExists) return res.status(409).json({ error: "Submission already exists for newEmployeeNumber" });
+
+      const trimmedNewEmployeeNumber = String(newEmployeeNumber).trim();
+      const trimmedNewEmployerName = newEmployerName ? String(newEmployerName).trim() : null;
+      const trimmedNewBranchName = newBranchName ? String(newBranchName).trim() : null;
+      const trimmedNewPhoneNumber = newPhoneNumber ? String(newPhoneNumber).trim() : null;
+      const trimmedNote = note ? String(note).trim() : null;
+
+      if (trimmedNewEmployeeNumber !== target.employeeNumber) {
+        const existingUser = await prisma.user.findUnique({
+          where: { employeeNumber: trimmedNewEmployeeNumber },
+        });
+        if (existingUser) {
+          return res.status(409).json({ error: "newEmployeeNumber already exists" });
+        }
+
+        const existingSubmissionWithNewNumber = await prisma.submission.findUnique({
+          where: { employeeNumber: trimmedNewEmployeeNumber },
+        });
+        if (existingSubmissionWithNewNumber) {
+          return res.status(409).json({ error: "Submission already exists for newEmployeeNumber" });
+        }
+      }
 
       const oldEmployeeNumber = target.employeeNumber;
+      const oldEmployerName = existingSubmission?.employerName || null;
+      const oldBranchName = existingSubmission?.branchName || null;
+      const oldPhoneNumber = existingSubmission?.phoneNumber || null;
 
-      // Do everything atomically
       const result = await prisma.$transaction(async (tx) => {
-        // Create history
         const history = await tx.transferHistory.create({
           data: {
             userId: target.id,
             performedById: req.user.id,
-            oldEmployerName: null,
-            newEmployerName: newEmployerName ? String(newEmployerName).trim() : null,
-            oldEmployeeNumber: oldEmployeeNumber,
-            newEmployeeNumber: String(newEmployeeNumber).trim(),
-            note: note ? String(note).trim() : null,
+            oldEmployerName,
+            newEmployerName: trimmedNewEmployerName,
+            oldBranchName,
+            newBranchName: trimmedNewBranchName,
+            oldPhoneNumber,
+            newPhoneNumber: trimmedNewPhoneNumber,
+            oldEmployeeNumber,
+            newEmployeeNumber: trimmedNewEmployeeNumber,
+            note: trimmedNote,
           },
         });
 
-        // Update User
         const updatedUser = await tx.user.update({
           where: { id: target.id },
           data: {
-            employeeNumber: String(newEmployeeNumber).trim(),
-            username: String(newEmployeeNumber).trim(), // keep username aligned with employeeNumber
+            employeeNumber: trimmedNewEmployeeNumber,
+            username: trimmedNewEmployeeNumber,
           },
-          select: { id: true, name: true, employeeNumber: true, username: true, role: true },
+          select: {
+            id: true,
+            name: true,
+            employeeNumber: true,
+            username: true,
+            role: true,
+          },
         });
 
-        // Update Submission records (client dashboard uses /submissions by employeeNumber)
         await tx.submission.updateMany({
           where: { employeeNumber: oldEmployeeNumber },
-          data: { employeeNumber: String(newEmployeeNumber).trim() },
+          data: {
+            employeeNumber: trimmedNewEmployeeNumber,
+            employerName: trimmedNewEmployerName ?? undefined,
+            branchName: trimmedNewBranchName ?? undefined,
+            phoneNumber: trimmedNewPhoneNumber ?? undefined,
+          },
         });
 
         return { history, updatedUser };
@@ -781,16 +827,20 @@ app.post(
     } catch (err) {
       console.error("❌ transfer error:", err);
 
-      // Prisma unique errors
       if (err.code === "P2002") {
-        return res.status(409).json({ error: "Unique constraint failed", details: err.meta });
+        return res.status(409).json({
+          error: "Unique constraint failed",
+          details: err.meta,
+        });
       }
 
-      return res.status(500).json({ error: "Transfer failed", details: err.message });
+      return res.status(500).json({
+        error: "Transfer failed",
+        details: err.message,
+      });
     }
   }
 );
-
 // ADMIN/STAFF: view transfer history for a user
 app.get(
   "/api/users/:id/transfers",
