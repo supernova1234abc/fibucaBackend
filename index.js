@@ -10,8 +10,9 @@ const bcrypt = require('bcrypt')
 const IS_VERCEL = !!process.env.VERCEL;
 const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
-const pdfParse = require("pdf-parse");
-const Tesseract = require("tesseract.js");
+//const pdfParse = require("pdf-parse");
+//const Tesseract = require("tesseract.js");
+let Tesseract = null;
 const streamifier = require('streamifier') // ✅ const import style
 const { v2: cloudinary } = require('cloudinary');
 // Configure Cloudinary
@@ -410,6 +411,16 @@ async function extractTextFromUpload(file) {
   const isImage = mime.startsWith("image/");
 
   if (isPdf) {
+    // Lazy load only when needed
+    let pdfParse;
+    try {
+      pdfParse = require("pdf-parse");
+    } catch (err) {
+      throw new Error(
+        "PDF scanning is not available on this deployment yet. Please upload JPG or PNG for now."
+      );
+    }
+
     try {
       const parsed = await pdfParse(file.buffer);
       const text = normalizeSpaces(parsed?.text || "");
@@ -417,15 +428,18 @@ async function extractTextFromUpload(file) {
         return { text: parsed.text || "", source: "pdf-text" };
       }
     } catch (err) {
-      console.warn("⚠️ pdf-parse failed, falling back to OCR:", err.message);
+      console.warn("⚠️ pdf-parse failed, falling back:", err.message);
+      throw new Error(
+        "This PDF could not be parsed on the current server. Please upload JPG or PNG scan for now."
+      );
     }
-
-    // For scanned PDFs, MVP fallback:
-    // Ask user to upload image version if OCR on PDF pages is not yet implemented.
-    throw new Error("This PDF appears to be scanned/image-only. For the MVP, please upload a JPG or PNG scan of the form page.");
   }
 
   if (isImage) {
+    if (!Tesseract) {
+      Tesseract = require("tesseract.js");
+    }
+
     const worker = await Tesseract.createWorker("eng");
     try {
       const result = await worker.recognize(file.buffer);
