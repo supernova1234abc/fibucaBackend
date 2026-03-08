@@ -19,25 +19,26 @@ model User {
   createdAt      DateTime  @default(now())
   deletedAt      DateTime?
 
-  idCards        IdCard[]
-  submissions    Submission[]
-  staffLinks     StaffLink[]
-  staffMarked    Submission[]       @relation("StaffSubmissions")
+  idCards     IdCard[]
+  submissions Submission[]
+  staffLinks  StaffLink[]
+  staffMarked Submission[] @relation("StaffSubmissions")
 
-  complaints     Complaint[]
-  transfers      TransferHistory[]  @relation("TransferUser")
-  transfersMade  TransferHistory[]  @relation("TransferBy")
+  complaints       Complaint[]
+  complaintReplies ComplaintReply[]
+  transfers        TransferHistory[] @relation("TransferUser")
+  transfersMade    TransferHistory[] @relation("TransferBy")
 }
 
 model StaffLink {
-  id        Int      @id @default(autoincrement())
-  token     String   @unique
+  id    Int    @id @default(autoincrement())
+  token String @unique
 
-  staffId   Int
-  staff     User     @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  staffId Int
+  staff   User @relation(fields: [staffId], references: [id], onDelete: Cascade)
 
   maxUses   Int?
-  usedCount Int      @default(0)
+  usedCount Int  @default(0)
 
   expiresAt DateTime
   isActive  Boolean  @default(true)
@@ -47,24 +48,23 @@ model StaffLink {
   @@index([staffId])
 }
 
-
 model Submission {
   id             Int      @id @default(autoincrement())
   employeeName   String
   employeeNumber String   @unique
-  phoneNumber    String?  // ✅ NEW
+  phoneNumber    String? // ✅ NEW
   pdfPath        String?
   employerName   String
-  branchName     String?  // ✅ NEW (DB only, not printed on PDF)
+  branchName     String? // ✅ NEW (DB only, not printed on PDF)
   dues           String
   witness        String
   submittedAt    DateTime @default(now())
 
-  userId         Int?
-  user           User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId Int?
+  user   User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  staffId        Int?
-  staff          User?    @relation("StaffSubmissions", fields: [staffId], references: [id])
+  staffId Int?
+  staff   User? @relation("StaffSubmissions", fields: [staffId], references: [id])
 
   @@index([userId])
   @@index([staffId])
@@ -75,9 +75,9 @@ model Submission {
 }
 
 model IdCard {
-  id            Int      @id @default(autoincrement())
-  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  userId        Int
+  id     Int  @id @default(autoincrement())
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId Int
 
   fullName      String
   rawPhotoUrl   String?
@@ -99,10 +99,25 @@ model Complaint {
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
 
-  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replies ComplaintReply[]
 
   @@index([userId])
   @@index([status])
+}
+
+model ComplaintReply {
+  id          Int      @id @default(autoincrement())
+  complaintId Int
+  senderId    Int
+  message     String
+  createdAt   DateTime @default(now())
+
+  complaint Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  sender    User      @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([complaintId])
+  @@index([senderId])
 }
 
 enum ComplaintStatus {
@@ -112,22 +127,22 @@ enum ComplaintStatus {
 }
 
 model TransferHistory {
-  id                Int      @id @default(autoincrement())
-  userId            Int
-  performedById     Int
+  id            Int @id @default(autoincrement())
+  userId        Int
+  performedById Int
 
-  oldEmployerName   String?
-  newEmployerName   String?
-  oldBranchName     String?   // ✅ NEW
-  newBranchName     String?   // ✅ NEW
-  oldPhoneNumber    String?   // ✅ NEW
-  newPhoneNumber    String?   // ✅ NEW
+  oldEmployerName String?
+  newEmployerName String?
+  oldBranchName   String? // ✅ NEW
+  newBranchName   String? // ✅ NEW
+  oldPhoneNumber  String? // ✅ NEW
+  newPhoneNumber  String? // ✅ NEW
 
   oldEmployeeNumber String
   newEmployeeNumber String
   note              String?
 
-  createdAt         DateTime @default(now())
+  createdAt DateTime @default(now())
 
   user        User @relation("TransferUser", fields: [userId], references: [id], onDelete: Cascade)
   performedBy User @relation("TransferBy", fields: [performedById], references: [id], onDelete: Restrict)

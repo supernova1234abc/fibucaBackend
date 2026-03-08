@@ -674,17 +674,71 @@ app.get(
     try {
       const rows = await prisma.complaint.findMany({
         include: {
-          user: { select: { id: true, name: true, employeeNumber: true } },
+          user: {
+            select: {
+              id: true,
+              name: true,
+              employeeNumber: true,
+            },
+          },
+          replies: {
+            include: {
+              sender: {
+                select: {
+                  id: true,
+                  name: true,
+                  role: true,
+                },
+              },
+            },
+            orderBy: { createdAt: "asc" },
+          },
         },
         orderBy: { createdAt: "desc" },
       });
+
       return res.json(rows);
     } catch (err) {
       console.error("❌ staff complaints error:", err);
-      return res.status(500).json({ error: "Failed to fetch complaints", details: err.message });
+      return res.status(500).json({
+        error: "Failed to fetch complaints",
+        details: err.message,
+      });
     }
   }
 );
+
+app.get("/api/complaints/mine", authenticate, async (req, res) => {
+  try {
+    const rows = await prisma.complaint.findMany({
+      where: { userId: req.user.id },
+      include: {
+        replies: {
+          include: {
+            sender: {
+              select: {
+                id: true,
+                name: true,
+                role: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    return res.json(rows);
+  } catch (err) {
+    console.error("❌ list my complaints error:", err);
+    return res.status(500).json({
+      error: "Failed to fetch complaints",
+      details: err.message,
+    });
+  }
+});
+
 
 // STAFF/ADMIN: update complaint status
 app.put(
@@ -712,6 +766,62 @@ app.put(
     } catch (err) {
       console.error("❌ update complaint status error:", err);
       return res.status(500).json({ error: "Failed to update complaint", details: err.message });
+    }
+  }
+);
+
+app.post(
+  "/api/staff/complaints/:id/reply",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const complaintId = Number(req.params.id);
+      const { message } = req.body;
+
+      if (!complaintId) {
+        return res.status(400).json({ error: "Invalid complaint id" });
+      }
+
+      if (!message || !String(message).trim()) {
+        return res.status(400).json({ error: "Reply message is required" });
+      }
+
+      const complaint = await prisma.complaint.findUnique({
+        where: { id: complaintId },
+      });
+
+      if (!complaint) {
+        return res.status(404).json({ error: "Complaint not found" });
+      }
+
+      const reply = await prisma.complaintReply.create({
+        data: {
+          complaintId,
+          senderId: req.user.id,
+          message: String(message).trim(),
+        },
+        include: {
+          sender: {
+            select: {
+              id: true,
+              name: true,
+              role: true,
+            },
+          },
+        },
+      });
+
+      return res.status(201).json({
+        message: "✅ Reply sent",
+        reply,
+      });
+    } catch (err) {
+      console.error("❌ complaint reply error:", err);
+      return res.status(500).json({
+        error: "Failed to send reply",
+        details: err.message,
+      });
     }
   }
 );
