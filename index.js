@@ -1412,7 +1412,7 @@ app.post(
 
       // If env var not set and on Vercel, use production URL
       if (!frontendUrl && process.env.VERCEL) {
-        frontendUrl = 'https://fibuca-frontend.vercel.app';
+        frontendUrl = "https://www.fibucatumis.or.tz,https://fibuca-frontend.vercel.app";
       }
 
       // Otherwise use request origin for local development
