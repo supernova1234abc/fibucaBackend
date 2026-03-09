@@ -460,6 +460,7 @@ async function extractTextFromUpload(file) {
 // =========================
 
 // OCR / text extraction preview
+
 app.post(
   "/api/forms/scan",
   authenticate,
@@ -471,23 +472,10 @@ app.post(
         return res.status(400).json({ error: "No file uploaded" });
       }
 
-      const extracted = await extractTextFromUpload(req.file);
-      const parsed = parseScannedFormText(extracted.text);
-
-      return res.json({
-        message: "✅ Scan processed",
-        source: extracted.source,
-        extractedData: {
-          employeeName: parsed.employeeName || "",
-          employeeNumber: parsed.employeeNumber || "",
-          employerName: parsed.employerName || "",
-          branchName: parsed.branchName || "",
-          phoneNumber: parsed.phoneNumber || "",
-          dues: parsed.dues || "1%",
-          witness: parsed.witness || "",
-        },
-        confidence: parsed.confidence,
-        rawText: parsed.rawText,
+      return res.status(400).json({
+        error: "Auto scan is temporarily unavailable on this deployment",
+        details:
+          "Please use manual entry after upload, or move OCR/PDF extraction to VPS for heavy processing.",
       });
     } catch (err) {
       console.error("❌ scan form error:", err);
