@@ -270,12 +270,7 @@ app.use(cookieParser())
 // --------------------
 // Serve static files
 // --------------------
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
-// ensure photos directory exists (backend may run without it)
-const photosDir = path.join(__dirname, 'photos');
-if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
-// serve photos directory for locally processed ID card images
-app.use('/photos', express.static(photosDir))
+app.use("/uploads", express.static(UPLOADS_DIR));
 
 
 // ✅ Use memory storage for all uploads
@@ -332,6 +327,23 @@ function extractField(text, patterns = []) {
     if (match?.[1]) return normalizeSpaces(match[1]);
   }
   return "";
+}
+
+function upperTrim(value) {
+  if (value === null || value === undefined) return null;
+  return String(value).trim().toUpperCase();
+}
+
+function normalizeSubmissionPayload(input = {}) {
+  return {
+    employeeName: upperTrim(input.employeeName) || "",
+    employeeNumber: upperTrim(input.employeeNumber) || "",
+    employerName: upperTrim(input.employerName) || "",
+    branchName: upperTrim(input.branchName),
+    phoneNumber: upperTrim(input.phoneNumber),
+    dues: upperTrim(input.dues) || "1%",
+    witness: upperTrim(input.witness) || "",
+  };
 }
 
 function parseScannedFormText(rawText = "") {
@@ -393,13 +405,13 @@ function parseScannedFormText(rawText = "") {
   const confidence = Math.min(0.25 + scoreParts * 0.15, 0.95);
 
   return {
-    employeeName,
-    employeeNumber,
-    employerName,
-    branchName,
-    phoneNumber,
-    dues: dues || "1%",
-    witness,
+    employeeName: upperTrim(employeeName) || "",
+    employeeNumber: upperTrim(employeeNumber) || "",
+    employerName: upperTrim(employerName) || "",
+    branchName: upperTrim(branchName),
+    phoneNumber: upperTrim(phoneNumber),
+    dues: upperTrim(dues || "1%"),
+    witness: upperTrim(witness) || "",
     confidence,
     rawText: fullText,
   };
@@ -494,6 +506,7 @@ app.post(
   requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
   async (req, res) => {
     try {
+      const normalized = normalizeSubmissionPayload(req.body);
       const {
         employeeName,
         employeeNumber,
@@ -502,7 +515,7 @@ app.post(
         phoneNumber,
         dues,
         witness,
-      } = req.body;
+      } = normalized;
 
       if (!employeeName || !employeeNumber || !employerName || !witness) {
         return res.status(400).json({
@@ -511,7 +524,7 @@ app.post(
       }
 
       const exists = await prisma.submission.findUnique({
-        where: { employeeNumber: String(employeeNumber).trim() },
+        where: { employeeNumber },
       });
 
       if (exists) {
@@ -522,36 +535,35 @@ app.post(
 
       const submission = await prisma.submission.create({
         data: {
-          employeeName: String(employeeName).trim(),
-          employeeNumber: String(employeeNumber).trim(),
-          employerName: String(employerName).trim(),
-          branchName: branchName ? String(branchName).trim() : null,
-          phoneNumber: phoneNumber ? String(phoneNumber).trim() : null,
-          dues: dues ? String(dues).trim() : "1%",
-          witness: String(witness).trim(),
-          pdfPath: null, // requires pdfPath String? in schema
+          employeeName,
+          employeeNumber,
+          employerName,
+          branchName,
+          phoneNumber,
+          dues,
+          witness,
+          pdfPath: null,
           submittedAt: new Date(),
           staffId: req.user.id,
         },
       });
 
       let user = await prisma.user.findUnique({
-        where: { employeeNumber: String(employeeNumber).trim() },
+        where: { employeeNumber },
       });
 
       let tempPassword = null;
 
       if (!user) {
         const suffix = Math.floor(1000 + Math.random() * 9000);
-        tempPassword = `${String(employeeNumber).trim()}${suffix}`;
+        tempPassword = `${employeeNumber}${suffix}`;
         const hashedPassword = await bcrypt.hash(tempPassword, 10);
-
         user = await prisma.user.create({
           data: {
-            name: String(employeeName).trim(),
-            username: String(employeeNumber).trim(),
-            employeeNumber: String(employeeNumber).trim(),
-            email: `${String(employeeNumber).trim()}@fibuca.com`,
+            name: employeeName,
+            username: employeeNumber,
+            employeeNumber,
+            email: `${employeeNumber}@fibuca.com`,
             password: hashedPassword,
             role: "CLIENT",
           },
@@ -714,36 +726,7 @@ app.get(
   }
 );
 
-app.get("/api/complaints/mine", authenticate, async (req, res) => {
-  try {
-    const rows = await prisma.complaint.findMany({
-      where: { userId: req.user.id },
-      include: {
-        replies: {
-          include: {
-            sender: {
-              select: {
-                id: true,
-                name: true,
-                role: true,
-              },
-            },
-          },
-          orderBy: { createdAt: "asc" },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-    });
 
-    return res.json(rows);
-  } catch (err) {
-    console.error("❌ list my complaints error:", err);
-    return res.status(500).json({
-      error: "Failed to fetch complaints",
-      details: err.message,
-    });
-  }
-});
 
 
 // STAFF/ADMIN: update complaint status
@@ -1233,41 +1216,47 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
 
 
     // 1️⃣ Parse form JSON from frontend
-    const form = JSON.parse(req.body.data);
+    const form = normalizeSubmissionPayload(JSON.parse(req.body.data));
     if (!req.file) return res.status(400).json({ error: "No PDF uploaded" });
 
     // Verify Cloudinary is configured
-    if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY) {
-      console.error('❌ Cloudinary not configured. Missing env vars:', {
-        CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
-        CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
-        CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
-      });
-      return res.status(500).json({
-        error: 'Server misconfigured: Cloudinary not set up. Contact admin.',
-        details: 'Missing Cloudinary environment variables'
-      });
-    }
+    let pdfUrl = "";
 
-    // ---------- 2️⃣ Prepare Cloudinary upload ----------
-    const publicId = `form_${form.employeeNumber}_${Date.now()}`;
-    const uploadStream = () =>
-      new Promise((resolve, reject) => {
+    if (PHOTO_MODE === "cloudinary" || process.env.VERCEL) {
+      if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY) {
+        console.error("❌ Cloudinary not configured. Missing env vars:", {
+          CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
+          CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
+          CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
+        });
+        return res.status(500).json({
+          error: "Server misconfigured: Cloudinary not set up. Contact admin.",
+          details: "Missing Cloudinary environment variables",
+        });
+      }
+
+      const publicId = `form_${form.employeeNumber}_${Date.now()}`;
+      const uploadResult = await new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
           {
-            resource_type: 'raw',
+            resource_type: "raw",
             folder: cloudFolder(CLOUDINARY_FOLDERS.forms),
             public_id: publicId,
-            format: 'pdf',
+            format: "pdf",
           },
           (error, result) => (error ? reject(error) : resolve(result))
         );
         streamifier.createReadStream(req.file.buffer).pipe(stream);
       });
 
-    // 3️⃣ Upload PDF
-    const uploadResult = await uploadStream();
-    const pdfUrl = uploadResult.secure_url;
+      pdfUrl = uploadResult.secure_url;
+    } else {
+      const pdfFilename = `form_${form.employeeNumber}_${Date.now()}.pdf`;
+      const pdfDiskPath = path.join(FORMS_UPLOAD_DIR, pdfFilename);
+
+      await fs.promises.writeFile(pdfDiskPath, req.file.buffer);
+      pdfUrl = buildUploadUrl(req, `forms/${pdfFilename}`);
+    }
 
     // 4️⃣ Check for existing submission
     const existingSubmission = await prisma.submission.findUnique({
@@ -1283,9 +1272,9 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
       data: {
         employeeName: form.employeeName,
         employeeNumber: form.employeeNumber,
-        phoneNumber: form.phoneNumber ? String(form.phoneNumber).trim() : null,
+        phoneNumber: form.phoneNumber,
         employerName: form.employerName,
-        branchName: form.branchName ? String(form.branchName).trim() : null,
+        branchName: form.branchName,
         dues: form.dues,
         witness: form.witness,
         pdfPath: pdfUrl,
@@ -1294,7 +1283,6 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
       },
     });
 
-
     //increment link usage
     await prisma.staffLink.update({
       where: { id: updatedLink.id },
@@ -1302,7 +1290,7 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
     });
 
     // 6️⃣ Check if user exists, else create
-    let user = await prisma.user.findUnique({ where: { username: form.employeeNumber } });
+    let user = await prisma.user.findUnique({ where: { employeeNumber: form.employeeNumber } });
     let tempPassword = null;
 
     if (!user) {
@@ -1682,14 +1670,14 @@ app.post('/bulk-upload', async (req, res) => {
       records.map(record =>
         prisma.submission.create({
           data: {
-            employeeName: record.employeeName || '',
-            employeeNumber: record.employeeNumber || '',
-            phoneNumber: record.phoneNumber || record.phone || null,
-            employerName: record.employerName || '',
-            branchName: record.branchName || record.branch || null,
-            dues: record.dues || '1%',
-            witness: record.witness || '',
+            employeeName: upperTrim(record.employeeName) || '',
+            employeeNumber: upperTrim(record.employeeNumber) || '',
+            phoneNumber: upperTrim(record.phoneNumber || record.phone),
             pdfPath: record.pdfPath || '',
+            employerName: upperTrim(record.employerName) || '',
+            branchName: upperTrim(record.branchName || record.branch),
+            dues: upperTrim(record.dues) || '1%',
+            witness: upperTrim(record.witness) || '',
             submittedAt: new Date()
           }
         })
@@ -1728,6 +1716,23 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
         cards[i] = updated;
       }));
     }
+
+    // ================= LOCAL VPS STORAGE PATHS =================
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+const PHOTOS_UPLOAD_DIR = path.join(UPLOADS_DIR, "photos");
+const FORMS_UPLOAD_DIR = path.join(UPLOADS_DIR, "forms");
+const IDCARDS_UPLOAD_DIR = path.join(UPLOADS_DIR, "idcards");
+
+[UPLOADS_DIR, PHOTOS_UPLOAD_DIR, FORMS_UPLOAD_DIR, IDCARDS_UPLOAD_DIR].forEach((dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+function buildUploadUrl(req, relativePath) {
+  const baseUrl = process.env.BACKEND_URL || `${req.protocol}://${req.get("host")}`;
+  return `${baseUrl}/uploads/${String(relativePath).replace(/^\/+/, "")}`;
+}
 
     res.json(cards);
   } catch (err) {
@@ -1787,9 +1792,6 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
     let cleanPhotoUrl = '';
 
     if (req.file && req.file.buffer) {
-      // ====================================================
-      // ☁️ CLOUDINARY MODE
-      // ====================================================
       if (PHOTO_MODE === "cloudinary") {
         console.log("☁️ POST using Cloudinary AI mode");
 
@@ -1797,7 +1799,7 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
           const stream = cloudinary.uploader.upload_stream(
             {
               folder: cloudFolder(CLOUDINARY_FOLDERS.photos),
-              resource_type: 'image'
+              resource_type: "image",
             },
             (error, result) => (error ? reject(error) : resolve(result))
           );
@@ -1805,11 +1807,17 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
         });
 
         rawPhotoUrl = uploadResult.secure_url;
-
-        // ✅ Transparent PNG background removal
         cleanPhotoUrl = makeTransparentCleanUrl(uploadResult);
-      }
+      } else {
+        const rawFilename = `raw_${card.id}_${Date.now()}.png`;
+        const rawDiskPath = path.join(PHOTOS_UPLOAD_DIR, rawFilename);
 
+        await fs.promises.writeFile(rawDiskPath, req.file.buffer);
+        rawPhotoUrl = buildUploadUrl(req, `photos/${rawFilename}`);
+
+        // In VPS mode keep cleanPhotoUrl empty until cleaning is done
+        cleanPhotoUrl = "";
+      }
       // Update card with photo URLs
       card = await prisma.idCard.update({
         where: { id: card.id },
@@ -1851,17 +1859,14 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
     let rawPhotoUrl = '';
     let cleanPhotoUrl = '';
 
-    // ====================================================
-    // ☁️ CLOUDINARY MODE
-    // ====================================================
-    if (PHOTO_MODE === "cloudinary") {
+     if (PHOTO_MODE === "cloudinary") {
       console.log("☁️ Using Cloudinary AI mode");
 
       const uploadResult = await new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
           {
             folder: cloudFolder(CLOUDINARY_FOLDERS.photos),
-            resource_type: 'image'
+            resource_type: "image",
           },
           (error, result) => (error ? reject(error) : resolve(result))
         );
@@ -1869,9 +1874,14 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
       });
 
       rawPhotoUrl = uploadResult.secure_url;
-
-      // ✅ Transparent PNG background removal
       cleanPhotoUrl = makeTransparentCleanUrl(uploadResult);
+    } else {
+      const rawFilename = `raw_${id}_${Date.now()}.png`;
+      const rawDiskPath = path.join(PHOTOS_UPLOAD_DIR, rawFilename);
+
+      await fs.promises.writeFile(rawDiskPath, req.file.buffer);
+      rawPhotoUrl = buildUploadUrl(req, `photos/${rawFilename}`);
+      cleanPhotoUrl = card.cleanPhotoUrl || "";
     }
 
     const updatedCard = await prisma.idCard.update({
@@ -2283,8 +2293,9 @@ app.put('/submissions/:id', authenticate, async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' })
   }
 
-  const { employeeName, employeeNumber, employerName, branchName, phoneNumber, dues, witness } = req.body
-  try {
+  const normalized = normalizeSubmissionPayload(req.body);
+  const { employeeName, employeeNumber, employerName, branchName, phoneNumber, dues, witness } = normalized;
+    try {
     const updated = await prisma.submission.update({
       where: { id },
       data: {
@@ -2373,17 +2384,11 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
     // 🚀 VPS MODE
     // ==========================
     if (!isVercel) {
-
-      const photosDir = path.join(__dirname, 'photos');
-      await fs.promises.mkdir(photosDir, { recursive: true });
-
-      const filename = `idcard_${id}_${Date.now()}.png`;
-      const filePath = path.join(photosDir, filename);
+      const filename = `idcard_clean_${id}_${Date.now()}.png`;
+      const filePath = path.join(IDCARDS_UPLOAD_DIR, filename);
 
       await fs.promises.writeFile(filePath, finalBuffer);
-
-      const baseUrl = process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
-      cleanUrl = `${baseUrl}/photos/${filename}`;
+      cleanUrl = buildUploadUrl(req, `idcards/${filename}`);
     }
 
     // ==========================
