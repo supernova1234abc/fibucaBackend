@@ -2194,6 +2194,41 @@ app.get(
   }
 );
 
+// ADMIN: list all generated ID cards
+app.get(
+  "/api/admin/idcards",
+  authenticate,
+  requireRole(["ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const cards = await prisma.idCard.findMany({
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              employeeNumber: true,
+              email: true,
+              role: true,
+            },
+          },
+        },
+        orderBy: {
+          issuedAt: "desc",
+        },
+      });
+
+      res.json(cards);
+    } catch (err) {
+      console.error("❌ GET /api/admin/idcards error:", err);
+      res.status(500).json({
+        error: "Failed to fetch ID cards",
+        details: err.message,
+      });
+    }
+  }
+);
+
 
 // ——————————————————————————
 // Submissions endpoints (used by frontend at '/submissions')
