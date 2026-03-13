@@ -1721,6 +1721,24 @@ app.post('/bulk-upload', async (req, res) => {
 });
 
 
+// ---------- GET /api/admin/idcards  (all cards, admin only) ----------
+app.get('/api/admin/idcards', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  try {
+    const cards = await prisma.idCard.findMany({
+      orderBy: { issuedAt: 'desc' },
+      include: {
+        user: {
+          select: { id: true, name: true, employeeNumber: true, email: true }
+        }
+      }
+    });
+    res.json(cards);
+  } catch (err) {
+    console.error('❌ GET /api/admin/idcards error:', err);
+    res.status(500).json({ error: 'Failed to fetch ID cards' });
+  }
+});
+
 // ---------- GET /api/idcards/:userId ----------
 app.get('/api/idcards/:userId', authenticate, async (req, res) => {
   try {
