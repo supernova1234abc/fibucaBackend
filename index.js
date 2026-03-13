@@ -1041,9 +1041,21 @@ app.post('/register', async (req, res) => {
 
 // Login → set cookie
 app.post('/api/login', async (req, res) => {
-  const { employeeNumber, password } = req.body
+  const { employeeNumber, username, password } = req.body
   try {
-    const user = await prisma.user.findUnique({ where: { employeeNumber } })
+    const loginId = String(employeeNumber || username || '').trim()
+    if (!loginId || !password) {
+      return res.status(400).json({ error: 'employeeNumber/username and password are required' })
+    }
+
+    const user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { employeeNumber: loginId },
+          { username: loginId }
+        ]
+      }
+    })
     if (!user) return res.status(404).json({ error: 'User not found' })
 
     const valid = await bcrypt.compare(password, user.password)
