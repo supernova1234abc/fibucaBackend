@@ -267,7 +267,7 @@ const FORMS_UPLOAD_DIR = path.join(UPLOADS_DIR, "forms");
 const IDCARDS_UPLOAD_DIR = path.join(UPLOADS_DIR, "idcards");
 
 [UPLOADS_DIR, PHOTOS_UPLOAD_DIR, FORMS_UPLOAD_DIR, IDCARDS_UPLOAD_DIR].forEach((dir) => {
-  if (!fs.existsSync(dir)) {
+  if (!IS_VERCEL && !fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
 });
