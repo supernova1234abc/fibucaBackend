@@ -1108,6 +1108,15 @@ app.get('/api/me', authenticate, async (req, res) => {
   res.json({ user })
 })
 
+// Runtime mode hints for frontend upload strategy.
+app.get('/api/photo-mode', authenticate, (req, res) => {
+  res.json({
+    photoMode: PHOTO_MODE,
+    isVercel: IS_VERCEL,
+    preferClientBgRemoval: IS_VERCEL,
+  })
+})
+
 // Logout
 app.post('/api/logout', (req, res) => {
   res.clearCookie('fibuca_token', {
@@ -1886,10 +1895,12 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
       return res.status(400).json({ error: 'No photo uploaded' });
     }
 
+    const clientCleaned = String(req.headers['x-photo-cleaned'] || '').trim() === '1';
+
     let rawPhotoUrl = '';
     let cleanPhotoUrl = '';
 
-     if (PHOTO_MODE === "cloudinary") {
+    if (PHOTO_MODE === "cloudinary") {
       console.log("☁️ Using Cloudinary AI mode");
 
       const uploadResult = await new Promise((resolve, reject) => {
@@ -1904,7 +1915,8 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
       });
 
       rawPhotoUrl = uploadResult.secure_url;
-      cleanPhotoUrl = makeTransparentCleanUrl(uploadResult);
+      // If client already removed the background in browser, reuse uploaded PNG.
+      cleanPhotoUrl = clientCleaned ? rawPhotoUrl : makeTransparentCleanUrl(uploadResult);
     } else {
       const rawFilename = `raw_${id}_${Date.now()}.png`;
       const rawDiskPath = path.join(PHOTOS_UPLOAD_DIR, rawFilename);
@@ -1942,6 +1954,12 @@ app.put('/api/idcards/:id/clean-photo', authenticate, async (req, res) => {
     let cleanPhotoUrl = '';
 
     if (PHOTO_MODE === "cloudinary") {
+      if (IS_VERCEL) {
+        return res.status(400).json({
+          error: 'Re-clean is disabled in browser-clean mode on Vercel. Upload a new photo to re-clean.',
+        });
+      }
+
       console.log("☁️ Re-clean using Cloudinary AI");
 
       const publicId = getCloudinaryPublicId(card.rawPhotoUrl);
