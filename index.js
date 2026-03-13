@@ -260,6 +260,23 @@ const prisma = new PrismaClient()
 const PORT = process.env.PORT
 const JWT_SECRET = process.env.JWT_SECRET || 'fibuca_secret'
 
+// Shared local upload paths for static serving and local-storage fallbacks.
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+const PHOTOS_UPLOAD_DIR = path.join(UPLOADS_DIR, "photos");
+const FORMS_UPLOAD_DIR = path.join(UPLOADS_DIR, "forms");
+const IDCARDS_UPLOAD_DIR = path.join(UPLOADS_DIR, "idcards");
+
+[UPLOADS_DIR, PHOTOS_UPLOAD_DIR, FORMS_UPLOAD_DIR, IDCARDS_UPLOAD_DIR].forEach((dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+function buildUploadUrl(req, relativePath) {
+  const baseUrl = process.env.BACKEND_URL || `${req.protocol}://${req.get("host")}`;
+  return `${baseUrl}/uploads/${String(relativePath).replace(/^\/+/, "")}`;
+}
+
 
 
 // Parse JSON / URL-encoded requests
@@ -1716,23 +1733,6 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
         cards[i] = updated;
       }));
     }
-
-    // ================= LOCAL VPS STORAGE PATHS =================
-const UPLOADS_DIR = path.join(__dirname, "uploads");
-const PHOTOS_UPLOAD_DIR = path.join(UPLOADS_DIR, "photos");
-const FORMS_UPLOAD_DIR = path.join(UPLOADS_DIR, "forms");
-const IDCARDS_UPLOAD_DIR = path.join(UPLOADS_DIR, "idcards");
-
-[UPLOADS_DIR, PHOTOS_UPLOAD_DIR, FORMS_UPLOAD_DIR, IDCARDS_UPLOAD_DIR].forEach((dir) => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-});
-
-function buildUploadUrl(req, relativePath) {
-  const baseUrl = process.env.BACKEND_URL || `${req.protocol}://${req.get("host")}`;
-  return `${baseUrl}/uploads/${String(relativePath).replace(/^\/+/, "")}`;
-}
 
     res.json(cards);
   } catch (err) {
