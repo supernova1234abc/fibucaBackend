@@ -220,7 +220,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Photo-Cleaned');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -241,7 +241,7 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Photo-Cleaned"],
   })
 );
 
@@ -1108,8 +1108,8 @@ app.get('/api/me', authenticate, async (req, res) => {
   res.json({ user })
 })
 
-// Runtime mode hints for frontend upload strategy.
-app.get('/api/photo-mode', authenticate, (req, res) => {
+// Runtime mode hints for frontend upload strategy (no auth needed — returns only config).
+app.get('/api/photo-mode', (req, res) => {
   res.json({
     photoMode: PHOTO_MODE,
     isVercel: IS_VERCEL,
