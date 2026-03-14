@@ -1748,6 +1748,55 @@ app.get('/api/admin/idcards', authenticate, requireRole(['ADMIN', 'SUPERADMIN'])
   }
 });
 
+// ---------- PUT /api/admin/idcards/:id/role  (admin only) ----------
+app.put('/api/admin/idcards/:id/role', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const incomingRole = typeof req.body?.role === 'string' ? req.body.role.trim() : '';
+
+    if (!id || Number.isNaN(id)) {
+      return res.status(400).json({ error: 'Invalid ID card id' });
+    }
+
+    if (!incomingRole) {
+      return res.status(400).json({ error: 'Role is required' });
+    }
+
+    if (incomingRole.length > 50) {
+      return res.status(400).json({ error: 'Role must be 50 characters or less' });
+    }
+
+    const existing = await prisma.idCard.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: 'ID card not found' });
+    }
+
+    const normalizedRole = incomingRole
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+      .join(' ');
+
+    const updated = await prisma.idCard.update({
+      where: { id },
+      data: { role: normalizedRole },
+      include: {
+        user: {
+          select: { id: true, name: true, employeeNumber: true, email: true }
+        }
+      }
+    });
+
+    res.json({
+      message: '✅ ID card role updated',
+      card: updated,
+    });
+  } catch (err) {
+    console.error('❌ PUT /api/admin/idcards/:id/role error:', err);
+    res.status(500).json({ error: 'Failed to update ID card role', details: err.message });
+  }
+});
+
 // ---------- GET /api/idcards/:userId ----------
 app.get('/api/idcards/:userId', authenticate, async (req, res) => {
   try {
