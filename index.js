@@ -1748,8 +1748,7 @@ app.get('/api/admin/idcards', authenticate, requireRole(['ADMIN', 'SUPERADMIN'])
   }
 });
 
-// ---------- PUT /api/admin/idcards/:id/role  (admin only) ----------
-app.put('/api/admin/idcards/:id/role', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+async function updateIdCardRoleByAdmin(req, res) {
   try {
     const id = Number(req.params.id);
     const incomingRole = typeof req.body?.role === 'string' ? req.body.role.trim() : '';
@@ -1787,15 +1786,21 @@ app.put('/api/admin/idcards/:id/role', authenticate, requireRole(['ADMIN', 'SUPE
       }
     });
 
-    res.json({
+    return res.json({
       message: '✅ ID card role updated',
       card: updated,
     });
   } catch (err) {
-    console.error('❌ PUT /api/admin/idcards/:id/role error:', err);
-    res.status(500).json({ error: 'Failed to update ID card role', details: err.message });
+    console.error('❌ PUT /api/admin/idcards role update error:', err);
+    return res.status(500).json({ error: 'Failed to update ID card role', details: err.message });
   }
-});
+}
+
+// ---------- PUT /api/admin/idcards/:id/role  (admin only) ----------
+app.put('/api/admin/idcards/:id/role', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), updateIdCardRoleByAdmin);
+
+// Backward-compatible endpoint in case frontend/server versions are mixed.
+app.put('/api/admin/idcards/:id', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), updateIdCardRoleByAdmin);
 
 // ---------- GET /api/idcards/:userId ----------
 app.get('/api/idcards/:userId', authenticate, async (req, res) => {
