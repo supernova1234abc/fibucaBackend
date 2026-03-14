@@ -16,6 +16,13 @@ model User {
   employeeNumber String    @unique
   role           Role      @default(CLIENT)
   firstLogin     Boolean   @default(true)
+  otpCodeHash    String?
+  otpPurpose     String?
+  otpChannel     String?
+  otpTarget      String?
+  otpExpiresAt   DateTime?
+  otpAttempts    Int       @default(0)
+  otpVerifiedAt  DateTime?
   createdAt      DateTime  @default(now())
   deletedAt      DateTime?
 

@@ -1039,6 +1039,428 @@ app.post('/register', async (req, res) => {
   }
 })
 
+const OTP_PURPOSE = {
+  FIRST_LOGIN: 'FIRST_LOGIN',
+  FORGOT_PASSWORD: 'FORGOT_PASSWORD',
+};
+
+const OTP_CHANNEL = {
+  EMAIL: 'EMAIL',
+  WHATSAPP: 'WHATSAPP',
+};
+
+const OTP_TTL_MINUTES = Number(process.env.OTP_TTL_MINUTES || 10);
+const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || 5);
+
+function maskEmail(value = '') {
+  const [name, domain] = String(value).split('@');
+  if (!name || !domain) return value;
+  const safeName = name.length <= 2 ? `${name[0] || '*'}*` : `${name.slice(0, 2)}***`;
+  return `${safeName}@${domain}`;
+}
+
+function normalizePhone(value = '') {
+  const clean = String(value).replace(/[^\d+]/g, '').trim();
+  if (!clean) return '';
+  if (clean.startsWith('+')) return clean;
+  if (clean.startsWith('0')) return `+255${clean.slice(1)}`;
+  return clean.startsWith('255') ? `+${clean}` : clean;
+}
+
+function maskPhone(value = '') {
+  const clean = normalizePhone(value);
+  if (!clean) return '';
+  const tail = clean.slice(-3);
+  return `***${tail}`;
+}
+
+function generateOtpCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+async function resolveWhatsappPhoneForUser(user) {
+  const latestSubmission = await prisma.submission.findFirst({
+    where: { employeeNumber: user.employeeNumber },
+    orderBy: { submittedAt: 'desc' },
+    select: { phoneNumber: true },
+  });
+  return normalizePhone(latestSubmission?.phoneNumber || '');
+}
+
+async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
+  const appName = 'FIBUCA';
+  const msg = `${appName} OTP for ${purpose.replace('_', ' ')} is ${otpCode}. Expires in ${OTP_TTL_MINUTES} minutes.`;
+
+  if (channel === OTP_CHANNEL.EMAIL) {
+    if (process.env.OTP_EMAIL_WEBHOOK_URL) {
+      await axios.post(process.env.OTP_EMAIL_WEBHOOK_URL, {
+        to: target,
+        subject: `${appName} OTP Code`,
+        message: msg,
+        code: otpCode,
+        purpose,
+        user: {
+          id: user.id,
+          employeeNumber: user.employeeNumber,
+          name: user.name,
+        },
+      }, { timeout: 15000 });
+      return;
+    }
+
+    console.log(`📧 OTP_EMAIL_WEBHOOK_URL not set. OTP for ${target}: ${otpCode}`);
+    return;
+  }
+
+  if (channel === OTP_CHANNEL.WHATSAPP) {
+    if (process.env.OTP_WHATSAPP_WEBHOOK_URL) {
+      await axios.post(process.env.OTP_WHATSAPP_WEBHOOK_URL, {
+        to: target,
+        message: msg,
+        code: otpCode,
+        purpose,
+        user: {
+          id: user.id,
+          employeeNumber: user.employeeNumber,
+          name: user.name,
+        },
+      }, { timeout: 15000 });
+      return;
+    }
+
+    if (process.env.WHATSAPP_CALLMEBOT_APIKEY) {
+      const safeMsg = encodeURIComponent(msg);
+      const safePhone = encodeURIComponent(target.replace(/^\+/, ''));
+      const apiKey = encodeURIComponent(process.env.WHATSAPP_CALLMEBOT_APIKEY);
+      await axios.get(`https://api.callmebot.com/whatsapp.php?phone=${safePhone}&text=${safeMsg}&apikey=${apiKey}`, {
+        timeout: 15000,
+      });
+      return;
+    }
+
+    console.log(`💬 OTP WhatsApp provider not configured. OTP for ${target}: ${otpCode}`);
+  }
+}
+
+async function persistOtpForUser({ userId, purpose, channel, target, otpCode }) {
+  const hash = await bcrypt.hash(otpCode, 10);
+  const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      otpCodeHash: hash,
+      otpPurpose: purpose,
+      otpChannel: channel,
+      otpTarget: target,
+      otpExpiresAt: expiresAt,
+      otpAttempts: 0,
+      otpVerifiedAt: null,
+    },
+  });
+
+  return expiresAt;
+}
+
+async function validateOtpForUser({ user, purpose, otpCode }) {
+  if (!user.otpCodeHash || !user.otpPurpose || !user.otpExpiresAt) {
+    return { ok: false, status: 400, error: 'No OTP request found. Request OTP first.' };
+  }
+
+  if (user.otpPurpose !== purpose) {
+    return { ok: false, status: 400, error: 'OTP purpose mismatch. Request a new OTP.' };
+  }
+
+  if (new Date(user.otpExpiresAt).getTime() < Date.now()) {
+    return { ok: false, status: 400, error: 'OTP expired. Request a new OTP.' };
+  }
+
+  const attempts = Number(user.otpAttempts || 0);
+  if (attempts >= OTP_MAX_ATTEMPTS) {
+    return { ok: false, status: 429, error: 'Too many OTP attempts. Request a new OTP.' };
+  }
+
+  const valid = await bcrypt.compare(String(otpCode || ''), user.otpCodeHash);
+  if (!valid) {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { otpAttempts: attempts + 1 },
+    });
+    return { ok: false, status: 401, error: 'Invalid OTP code.' };
+  }
+
+  return { ok: true };
+}
+
+function findUserByIdentifier(identifier = '') {
+  const key = String(identifier || '').trim();
+  if (!key) return null;
+
+  return prisma.user.findFirst({
+    where: {
+      OR: [
+        { employeeNumber: key },
+        { username: key },
+        { email: key },
+      ],
+    },
+  });
+}
+
+// Request OTP for first-login or forgot-password.
+app.post('/api/auth/request-otp', async (req, res) => {
+  try {
+    const { identifier, purpose, channel } = req.body;
+    const otpPurpose = String(purpose || '').trim().toUpperCase();
+    const otpChannel = String(channel || '').trim().toUpperCase();
+
+    if (!identifier || !otpPurpose || !otpChannel) {
+      return res.status(400).json({ error: 'identifier, purpose and channel are required' });
+    }
+
+    if (!Object.values(OTP_PURPOSE).includes(otpPurpose)) {
+      return res.status(400).json({ error: 'Unsupported OTP purpose' });
+    }
+
+    if (!Object.values(OTP_CHANNEL).includes(otpChannel)) {
+      return res.status(400).json({ error: 'Unsupported OTP channel' });
+    }
+
+    const user = await findUserByIdentifier(identifier);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (otpPurpose === OTP_PURPOSE.FIRST_LOGIN && !user.firstLogin) {
+      return res.status(400).json({ error: 'First-login OTP is not required for this account' });
+    }
+
+    let target = '';
+    if (otpChannel === OTP_CHANNEL.EMAIL) {
+      if (!user.email) {
+        return res.status(400).json({ error: 'This account has no email configured' });
+      }
+      target = user.email;
+    } else {
+      target = await resolveWhatsappPhoneForUser(user);
+      if (!target) {
+        return res.status(400).json({ error: 'No WhatsApp phone found for this account' });
+      }
+    }
+
+    const otpCode = generateOtpCode();
+    const expiresAt = await persistOtpForUser({
+      userId: user.id,
+      purpose: otpPurpose,
+      channel: otpChannel,
+      target,
+      otpCode,
+    });
+
+    await sendOtpMessage({ user, channel: otpChannel, purpose: otpPurpose, otpCode, target });
+
+    const maskedTarget = otpChannel === OTP_CHANNEL.EMAIL ? maskEmail(target) : maskPhone(target);
+    const payload = {
+      message: `OTP sent via ${otpChannel}`,
+      channel: otpChannel,
+      target: maskedTarget,
+      expiresAt,
+    };
+
+    if (process.env.EXPOSE_DEV_OTP === 'true') {
+      payload.devOtp = otpCode;
+    }
+
+    return res.json(payload);
+  } catch (err) {
+    console.error('❌ request-otp error:', err);
+    return res.status(500).json({ error: 'Failed to send OTP' });
+  }
+});
+
+// Verify OTP only (optional step before reset).
+app.post('/api/auth/verify-otp', async (req, res) => {
+  try {
+    const { identifier, purpose, otp } = req.body;
+    const otpPurpose = String(purpose || '').trim().toUpperCase();
+
+    if (!identifier || !otpPurpose || !otp) {
+      return res.status(400).json({ error: 'identifier, purpose and otp are required' });
+    }
+
+    const user = await findUserByIdentifier(identifier);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const result = await validateOtpForUser({ user, purpose: otpPurpose, otpCode: otp });
+    if (!result.ok) {
+      return res.status(result.status).json({ error: result.error });
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { otpVerifiedAt: new Date() },
+    });
+
+    return res.json({ message: 'OTP verified successfully' });
+  } catch (err) {
+    console.error('❌ verify-otp error:', err);
+    return res.status(500).json({ error: 'Failed to verify OTP' });
+  }
+});
+
+// Forgot-password reset using OTP.
+app.post('/api/auth/reset-password-with-otp', async (req, res) => {
+  try {
+    const { identifier, otp, newPassword } = req.body;
+
+    if (!identifier || !otp || !newPassword) {
+      return res.status(400).json({ error: 'identifier, otp and newPassword are required' });
+    }
+
+    if (String(newPassword).length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    }
+
+    const user = await findUserByIdentifier(identifier);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const result = await validateOtpForUser({
+      user,
+      purpose: OTP_PURPOSE.FORGOT_PASSWORD,
+      otpCode: otp,
+    });
+
+    if (!result.ok) {
+      return res.status(result.status).json({ error: result.error });
+    }
+
+    const hash = await bcrypt.hash(String(newPassword), 10);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        password: hash,
+        firstLogin: false,
+        otpCodeHash: null,
+        otpPurpose: null,
+        otpChannel: null,
+        otpTarget: null,
+        otpExpiresAt: null,
+        otpAttempts: 0,
+        otpVerifiedAt: null,
+      },
+    });
+
+    return res.json({ message: 'Password reset successful. You can now login.' });
+  } catch (err) {
+    console.error('❌ reset-password-with-otp error:', err);
+    return res.status(500).json({ error: 'Failed to reset password' });
+  }
+});
+
+// Authenticated first-login OTP request (for users who already logged in once with temp password).
+app.post('/api/auth/request-first-login-otp', authenticate, async (req, res) => {
+  try {
+    const channel = String(req.body?.channel || '').trim().toUpperCase();
+    if (!Object.values(OTP_CHANNEL).includes(channel)) {
+      return res.status(400).json({ error: 'Unsupported OTP channel' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.firstLogin) {
+      return res.status(400).json({ error: 'First-login OTP is not required for this account' });
+    }
+
+    let target = '';
+    if (channel === OTP_CHANNEL.EMAIL) {
+      if (!user.email) return res.status(400).json({ error: 'No email configured for this account' });
+      target = user.email;
+    } else {
+      target = await resolveWhatsappPhoneForUser(user);
+      if (!target) return res.status(400).json({ error: 'No WhatsApp phone found for this account' });
+    }
+
+    const otpCode = generateOtpCode();
+    const expiresAt = await persistOtpForUser({
+      userId: user.id,
+      purpose: OTP_PURPOSE.FIRST_LOGIN,
+      channel,
+      target,
+      otpCode,
+    });
+
+    await sendOtpMessage({ user, channel, purpose: OTP_PURPOSE.FIRST_LOGIN, otpCode, target });
+
+    const payload = {
+      message: `OTP sent via ${channel}`,
+      channel,
+      target: channel === OTP_CHANNEL.EMAIL ? maskEmail(target) : maskPhone(target),
+      expiresAt,
+    };
+    if (process.env.EXPOSE_DEV_OTP === 'true') payload.devOtp = otpCode;
+
+    return res.json(payload);
+  } catch (err) {
+    console.error('❌ request-first-login-otp error:', err);
+    return res.status(500).json({ error: 'Failed to send OTP' });
+  }
+});
+
+// Authenticated completion of first-login password setup using OTP.
+app.post('/api/auth/complete-first-login', authenticate, async (req, res) => {
+  try {
+    const { otp, newPassword } = req.body;
+
+    if (!otp || !newPassword) {
+      return res.status(400).json({ error: 'otp and newPassword are required' });
+    }
+
+    if (String(newPassword).length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.firstLogin) {
+      return res.status(400).json({ error: 'First-login flow is already completed' });
+    }
+
+    const result = await validateOtpForUser({
+      user,
+      purpose: OTP_PURPOSE.FIRST_LOGIN,
+      otpCode: otp,
+    });
+    if (!result.ok) {
+      return res.status(result.status).json({ error: result.error });
+    }
+
+    const hash = await bcrypt.hash(String(newPassword), 10);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        password: hash,
+        firstLogin: false,
+        otpCodeHash: null,
+        otpPurpose: null,
+        otpChannel: null,
+        otpTarget: null,
+        otpExpiresAt: null,
+        otpAttempts: 0,
+        otpVerifiedAt: null,
+      },
+    });
+
+    return res.json({ message: 'First-login setup complete. Password updated.' });
+  } catch (err) {
+    console.error('❌ complete-first-login error:', err);
+    return res.status(500).json({ error: 'Failed to complete first login' });
+  }
+});
+
 // Login → set cookie
 app.post('/api/login', async (req, res) => {
   const { employeeNumber, username, password } = req.body
@@ -2202,6 +2624,84 @@ app.put('/api/admin/users/:id',
       res.status(500).json({ error: 'Failed to update user' })
     }
   })
+
+// POST  /api/admin/users/:id/reset-first-login-otp
+// Force first-login flow and send OTP via selected channel.
+app.post('/api/admin/users/:id/reset-first-login-otp',
+  authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid user id' });
+      }
+
+      const channel = String(req.body?.channel || OTP_CHANNEL.EMAIL).trim().toUpperCase();
+      if (!Object.values(OTP_CHANNEL).includes(channel)) {
+        return res.status(400).json({ error: 'Unsupported OTP channel' });
+      }
+
+      const user = await prisma.user.findUnique({ where: { id } });
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      let target = '';
+      if (channel === OTP_CHANNEL.EMAIL) {
+        if (!user.email) {
+          return res.status(400).json({ error: 'This user has no email configured' });
+        }
+        target = user.email;
+      } else {
+        target = await resolveWhatsappPhoneForUser(user);
+        if (!target) {
+          return res.status(400).json({ error: 'No WhatsApp phone found for this user' });
+        }
+      }
+
+      const otpCode = generateOtpCode();
+
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { firstLogin: true },
+      });
+
+      const expiresAt = await persistOtpForUser({
+        userId: user.id,
+        purpose: OTP_PURPOSE.FIRST_LOGIN,
+        channel,
+        target,
+        otpCode,
+      });
+
+      await sendOtpMessage({
+        user,
+        channel,
+        purpose: OTP_PURPOSE.FIRST_LOGIN,
+        otpCode,
+        target,
+      });
+
+      const payload = {
+        message: 'First-login OTP sent successfully',
+        user: {
+          id: user.id,
+          employeeNumber: user.employeeNumber,
+          name: user.name,
+          firstLogin: true,
+        },
+        channel,
+        target: channel === OTP_CHANNEL.EMAIL ? maskEmail(target) : maskPhone(target),
+        expiresAt,
+      };
+
+      if (process.env.EXPOSE_DEV_OTP === 'true') payload.devOtp = otpCode;
+
+      return res.json(payload);
+    } catch (err) {
+      console.error('❌ POST /api/admin/users/:id/reset-first-login-otp error:', err);
+      return res.status(500).json({ error: 'Failed to reset first-login OTP', details: err.message });
+    }
+  });
 // ——————————————————————————
 // DELETE /api/admin/users/:id
 // Delete a user by ID (supports cascade or soft delete)

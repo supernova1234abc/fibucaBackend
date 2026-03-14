@@ -1,0 +1,9 @@
+-- AlterTable
+ALTER TABLE "User"
+ADD COLUMN "otpCodeHash" TEXT,
+ADD COLUMN "otpPurpose" TEXT,
+ADD COLUMN "otpChannel" TEXT,
+ADD COLUMN "otpTarget" TEXT,
+ADD COLUMN "otpExpiresAt" TIMESTAMP(3),
+ADD COLUMN "otpAttempts" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN "otpVerifiedAt" TIMESTAMP(3);
