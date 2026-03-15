@@ -2799,8 +2799,14 @@ app.post('/api/admin/users/:id/reset-password',
         where: { id },
         data: {
           password: hash,
-          passwordChanged: false,   // force the user to set their own password on next login
           firstLogin: true,
+          otpCodeHash: null,
+          otpPurpose: null,
+          otpChannel: null,
+          otpTarget: null,
+          otpExpiresAt: null,
+          otpAttempts: 0,
+          otpVerifiedAt: null,
         },
       });
       return res.json({ message: 'Password reset successfully. User must change it on next login.' });
