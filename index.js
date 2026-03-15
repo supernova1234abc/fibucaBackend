@@ -1052,6 +1052,45 @@ const OTP_CHANNEL = {
 
 const OTP_TTL_MINUTES = Number(process.env.OTP_TTL_MINUTES || 10);
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || 5);
+function isPlaceholderConfig(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return true;
+
+  return [
+    'your-email@gmail.com',
+    'your-app-password-here',
+    'your-callmebot-apikey-here',
+    'changeme',
+    'example',
+    'placeholder',
+  ].some((token) => normalized.includes(token));
+}
+
+function hasUsableSmtpConfig() {
+  return Boolean(
+    process.env.SMTP_HOST &&
+    process.env.SMTP_USER &&
+    process.env.SMTP_PASS &&
+    !isPlaceholderConfig(process.env.SMTP_HOST) &&
+    !isPlaceholderConfig(process.env.SMTP_USER) &&
+    !isPlaceholderConfig(process.env.SMTP_PASS)
+  );
+}
+
+function hasUsableWhatsappConfig() {
+  return Boolean(
+    process.env.WHATSAPP_CALLMEBOT_APIKEY &&
+    !isPlaceholderConfig(process.env.WHATSAPP_CALLMEBOT_APIKEY)
+  );
+}
+
+function canUseOtpConsoleFallback() {
+  return process.env.NODE_ENV !== 'production';
+}
+
+function shouldExposeOtpCode(deliveryMode) {
+  return process.env.EXPOSE_DEV_OTP === 'true' || deliveryMode === 'console';
+}
 
 function maskEmail(value = '') {
   const [name, domain] = String(value).split('@');
@@ -1103,7 +1142,7 @@ async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
 
   if (channel === OTP_CHANNEL.EMAIL) {
     // 1. Use nodemailer SMTP (preferred — set SMTP_HOST in .env)
-    if (process.env.SMTP_HOST) {
+    if (hasUsableSmtpConfig()) {
       const transporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST,
         port: Number(process.env.SMTP_PORT || 587),
@@ -1120,7 +1159,7 @@ async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
         text: msg,
         html: htmlMsg,
       });
-      return;
+      return { deliveryMode: 'smtp' };
     }
 
     // 2. Fallback to webhook
@@ -1134,7 +1173,12 @@ async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
         purpose,
         user: { id: user.id, employeeNumber: user.employeeNumber, name: user.name },
       }, { timeout: 15000 });
-      return;
+      return { deliveryMode: 'webhook' };
+    }
+
+    if (canUseOtpConsoleFallback()) {
+      console.info(`Email OTP provider not configured. OTP for ${target}: ${otpCode}`);
+      return { deliveryMode: 'console' };
     }
 
     // No provider — fail loudly so the caller returns 500 to the client
@@ -1151,11 +1195,11 @@ async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
         purpose,
         user: { id: user.id, employeeNumber: user.employeeNumber, name: user.name },
       }, { timeout: 15000 });
-      return;
+      return { deliveryMode: 'webhook' };
     }
 
     // 2. CallMeBot
-    if (process.env.WHATSAPP_CALLMEBOT_APIKEY) {
+    if (hasUsableWhatsappConfig()) {
       const safeMsg = encodeURIComponent(msg);
       const safePhone = encodeURIComponent(target.replace(/^\+/, ''));
       const apiKey = encodeURIComponent(process.env.WHATSAPP_CALLMEBOT_APIKEY);
@@ -1163,7 +1207,12 @@ async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
         `https://api.callmebot.com/whatsapp.php?phone=${safePhone}&text=${safeMsg}&apikey=${apiKey}`,
         { timeout: 15000 }
       );
-      return;
+      return { deliveryMode: 'callmebot' };
+    }
+
+    if (canUseOtpConsoleFallback()) {
+      console.info(`WhatsApp OTP provider not configured. OTP for ${target}: ${otpCode}`);
+      return { deliveryMode: 'console' };
     }
 
     // No provider — fail loudly
@@ -1286,7 +1335,7 @@ app.post('/api/auth/request-otp', async (req, res) => {
       otpCode,
     });
 
-    await sendOtpMessage({ user, channel: otpChannel, purpose: otpPurpose, otpCode, target });
+    const delivery = await sendOtpMessage({ user, channel: otpChannel, purpose: otpPurpose, otpCode, target });
 
     const maskedTarget = otpChannel === OTP_CHANNEL.EMAIL ? maskEmail(target) : maskPhone(target);
     const payload = {
@@ -1296,7 +1345,7 @@ app.post('/api/auth/request-otp', async (req, res) => {
       expiresAt,
     };
 
-    if (process.env.EXPOSE_DEV_OTP === 'true') {
+    if (shouldExposeOtpCode(delivery?.deliveryMode)) {
       payload.devOtp = otpCode;
     }
 
@@ -1422,7 +1471,7 @@ app.post('/api/auth/request-first-login-otp', authenticate, async (req, res) => 
       otpCode,
     });
 
-    await sendOtpMessage({ user, channel, purpose: OTP_PURPOSE.FIRST_LOGIN, otpCode, target });
+    const delivery = await sendOtpMessage({ user, channel, purpose: OTP_PURPOSE.FIRST_LOGIN, otpCode, target });
 
     const payload = {
       message: `OTP sent via ${channel}`,
@@ -1430,7 +1479,7 @@ app.post('/api/auth/request-first-login-otp', authenticate, async (req, res) => 
       target: channel === OTP_CHANNEL.EMAIL ? maskEmail(target) : maskPhone(target),
       expiresAt,
     };
-    if (process.env.EXPOSE_DEV_OTP === 'true') payload.devOtp = otpCode;
+    if (shouldExposeOtpCode(delivery?.deliveryMode)) payload.devOtp = otpCode;
 
     return res.json(payload);
   } catch (err) {
@@ -2702,7 +2751,7 @@ app.post('/api/admin/users/:id/reset-first-login-otp',
         otpCode,
       });
 
-      await sendOtpMessage({
+      const delivery = await sendOtpMessage({
         user,
         channel,
         purpose: OTP_PURPOSE.FIRST_LOGIN,
@@ -2723,7 +2772,7 @@ app.post('/api/admin/users/:id/reset-first-login-otp',
         expiresAt,
       };
 
-      if (process.env.EXPOSE_DEV_OTP === 'true') payload.devOtp = otpCode;
+      if (shouldExposeOtpCode(delivery?.deliveryMode)) payload.devOtp = otpCode;
 
       return res.json(payload);
     } catch (err) {
