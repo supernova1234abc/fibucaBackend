@@ -1,5 +1,6 @@
 // backend/index.js
 const express = require('express')
+const nodemailer = require('nodemailer')
 const cors = require('cors')
 const cookieParser = require('cookie-parser')
 const multer = require('multer')
@@ -1089,56 +1090,84 @@ async function resolveWhatsappPhoneForUser(user) {
 
 async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
   const appName = 'FIBUCA';
-  const msg = `${appName} OTP for ${purpose.replace('_', ' ')} is ${otpCode}. Expires in ${OTP_TTL_MINUTES} minutes.`;
+  const purposeLabel = purpose.replace(/_/g, ' ');
+  const msg = `${appName} OTP for ${purposeLabel} is ${otpCode}. Expires in ${OTP_TTL_MINUTES} minutes.`;
+  const htmlMsg = `
+    <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">
+      <h2 style="color:#1e3a5f;margin-bottom:8px">${appName} – Verification Code</h2>
+      <p style="color:#374151">Hello ${user.name || ''},</p>
+      <p style="color:#374151">Your OTP code for <strong>${purposeLabel}</strong> is:</p>
+      <div style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#1e3a5f;padding:16px 0">${otpCode}</div>
+      <p style="color:#6b7280;font-size:13px">This code expires in ${OTP_TTL_MINUTES} minutes. Do not share it with anyone.</p>
+    </div>`;
 
   if (channel === OTP_CHANNEL.EMAIL) {
+    // 1. Use nodemailer SMTP (preferred — set SMTP_HOST in .env)
+    if (process.env.SMTP_HOST) {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: process.env.SMTP_SECURE === 'true',
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+      });
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        to: target,
+        subject: `${appName} OTP Code`,
+        text: msg,
+        html: htmlMsg,
+      });
+      return;
+    }
+
+    // 2. Fallback to webhook
     if (process.env.OTP_EMAIL_WEBHOOK_URL) {
       await axios.post(process.env.OTP_EMAIL_WEBHOOK_URL, {
         to: target,
         subject: `${appName} OTP Code`,
         message: msg,
+        html: htmlMsg,
         code: otpCode,
         purpose,
-        user: {
-          id: user.id,
-          employeeNumber: user.employeeNumber,
-          name: user.name,
-        },
+        user: { id: user.id, employeeNumber: user.employeeNumber, name: user.name },
       }, { timeout: 15000 });
       return;
     }
 
-    console.log(`📧 OTP_EMAIL_WEBHOOK_URL not set. OTP for ${target}: ${otpCode}`);
-    return;
+    // No provider — fail loudly so the caller returns 500 to the client
+    throw new Error('Email not configured. Add SMTP_HOST/SMTP_USER/SMTP_PASS (or OTP_EMAIL_WEBHOOK_URL) to your .env file.');
   }
 
   if (channel === OTP_CHANNEL.WHATSAPP) {
+    // 1. Custom webhook
     if (process.env.OTP_WHATSAPP_WEBHOOK_URL) {
       await axios.post(process.env.OTP_WHATSAPP_WEBHOOK_URL, {
         to: target,
         message: msg,
         code: otpCode,
         purpose,
-        user: {
-          id: user.id,
-          employeeNumber: user.employeeNumber,
-          name: user.name,
-        },
+        user: { id: user.id, employeeNumber: user.employeeNumber, name: user.name },
       }, { timeout: 15000 });
       return;
     }
 
+    // 2. CallMeBot
     if (process.env.WHATSAPP_CALLMEBOT_APIKEY) {
       const safeMsg = encodeURIComponent(msg);
       const safePhone = encodeURIComponent(target.replace(/^\+/, ''));
       const apiKey = encodeURIComponent(process.env.WHATSAPP_CALLMEBOT_APIKEY);
-      await axios.get(`https://api.callmebot.com/whatsapp.php?phone=${safePhone}&text=${safeMsg}&apikey=${apiKey}`, {
-        timeout: 15000,
-      });
+      await axios.get(
+        `https://api.callmebot.com/whatsapp.php?phone=${safePhone}&text=${safeMsg}&apikey=${apiKey}`,
+        { timeout: 15000 }
+      );
       return;
     }
 
-    console.log(`💬 OTP WhatsApp provider not configured. OTP for ${target}: ${otpCode}`);
+    // No provider — fail loudly
+    throw new Error('WhatsApp not configured. Add WHATSAPP_CALLMEBOT_APIKEY (or OTP_WHATSAPP_WEBHOOK_URL) to your .env file.');
   }
 }
 
@@ -2702,6 +2731,36 @@ app.post('/api/admin/users/:id/reset-first-login-otp',
       return res.status(500).json({ error: 'Failed to reset first-login OTP', details: err.message });
     }
   });
+// ——————————————————————————
+// POST /api/admin/users/:id/reset-password
+// Admin directly sets a temporary password; user is forced to change on next login.
+app.post('/api/admin/users/:id/reset-password',
+  authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'Invalid user ID' });
+
+    const { newPassword } = req.body;
+    if (!newPassword || String(newPassword).length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    }
+
+    try {
+      const hash = await bcrypt.hash(String(newPassword), 10);
+      await prisma.user.update({
+        where: { id },
+        data: {
+          password: hash,
+          passwordChanged: false,   // force the user to set their own password on next login
+          firstLogin: true,
+        },
+      });
+      return res.json({ message: 'Password reset successfully. User must change it on next login.' });
+    } catch (err) {
+      console.error(`❌ POST /api/admin/users/${id}/reset-password error:`, err);
+      return res.status(500).json({ error: 'Failed to reset password', details: err.message });
+    }
+  });
+
 // ——————————————————————————
 // DELETE /api/admin/users/:id
 // Delete a user by ID (supports cascade or soft delete)
