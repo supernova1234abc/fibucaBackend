@@ -1048,6 +1048,7 @@ const OTP_PURPOSE = {
 const OTP_CHANNEL = {
   EMAIL: 'EMAIL',
   WHATSAPP: 'WHATSAPP',
+  SMS: 'SMS',
 };
 
 const OTP_TTL_MINUTES = Number(process.env.OTP_TTL_MINUTES || 10);
@@ -1217,6 +1218,109 @@ async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
 
     // No provider — fail loudly
     throw new Error('WhatsApp not configured. Add WHATSAPP_CALLMEBOT_APIKEY (or OTP_WHATSAPP_WEBHOOK_URL) to your .env file.');
+  }
+
+  if (channel === OTP_CHANNEL.SMS) {
+    if (process.env.OTP_SMS_WEBHOOK_URL) {
+      await axios.post(process.env.OTP_SMS_WEBHOOK_URL, {
+        to: target,
+        message: msg,
+        code: otpCode,
+        purpose,
+        user: { id: user.id, employeeNumber: user.employeeNumber, name: user.name },
+      }, { timeout: 15000 });
+      return { deliveryMode: 'webhook' };
+    }
+
+    if (canUseOtpConsoleFallback()) {
+      console.info(`SMS OTP provider not configured. OTP for ${target}: ${otpCode}`);
+      return { deliveryMode: 'console' };
+    }
+
+    throw new Error('SMS not configured. Add OTP_SMS_WEBHOOK_URL to your .env file.');
+  }
+}
+
+// Send login credentials to a user via email, WhatsApp, and SMS (best-effort).
+async function sendWelcomeCredentials({ user, username, password, phone }) {
+  const appName = 'FIBUCA';
+  const msg = `Welcome to ${appName}!\n\nYour login credentials:\nUsername: ${username}\nTemporary Password: ${password}\n\nPlease login and change your password immediately at ${process.env.VITE_FRONTEND_URL ? process.env.VITE_FRONTEND_URL.split(',')[0] : ''}`;
+  const htmlMsg = `
+    <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">
+      <h2 style="color:#1e3a5f;margin-bottom:8px">${appName} – Welcome!</h2>
+      <p style="color:#374151">Hello ${user.name || ''},</p>
+      <p style="color:#374151">Your account has been created. Here are your login credentials:</p>
+      <div style="background:#f9fafb;padding:16px;border-radius:6px;margin:12px 0;border:1px solid #e5e7eb">
+        <p style="margin:6px 0"><strong>Username:</strong> <code style="background:#fff;padding:3px 8px;border-radius:3px;border:1px solid #e5e7eb">${username}</code></p>
+        <p style="margin:6px 0"><strong>Temporary Password:</strong> <code style="background:#fff;padding:3px 8px;border-radius:3px;border:1px solid #e5e7eb">${password}</code></p>
+      </div>
+      <p style="color:#dc2626;font-size:13px">&#9888;&#65039; This is a temporary password. Please login and change it immediately.</p>
+    </div>`;
+
+  // 1. Email (skip placeholder @fibuca.com addresses)
+  if (user.email && !user.email.toLowerCase().endsWith('@fibuca.com')) {
+    try {
+      if (hasUsableSmtpConfig()) {
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST,
+          port: Number(process.env.SMTP_PORT || 587),
+          secure: process.env.SMTP_SECURE === 'true',
+          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+        });
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || process.env.SMTP_USER,
+          to: user.email,
+          subject: `Welcome to ${appName} – Your Login Credentials`,
+          text: msg,
+          html: htmlMsg,
+        });
+      } else if (process.env.OTP_EMAIL_WEBHOOK_URL) {
+        await axios.post(process.env.OTP_EMAIL_WEBHOOK_URL, {
+          to: user.email,
+          subject: `Welcome to ${appName} – Your Login Credentials`,
+          message: msg, html: htmlMsg, username, password,
+          user: { id: user.id, employeeNumber: user.employeeNumber, name: user.name },
+        }, { timeout: 15000 });
+      } else {
+        console.info(`📧 Email not configured. Credentials for ${user.email} — username: ${username}`);
+      }
+    } catch (e) {
+      console.warn('⚠️ sendWelcomeCredentials email failed:', e.message);
+    }
+  }
+
+  // 2. WhatsApp
+  const waPhone = normalizePhone(phone || '');
+  if (waPhone) {
+    try {
+      if (process.env.OTP_WHATSAPP_WEBHOOK_URL) {
+        await axios.post(process.env.OTP_WHATSAPP_WEBHOOK_URL, {
+          to: waPhone, message: msg, username, password,
+          user: { id: user.id, employeeNumber: user.employeeNumber, name: user.name },
+        }, { timeout: 15000 });
+      } else if (hasUsableWhatsappConfig()) {
+        const safeMsg = encodeURIComponent(msg);
+        const safePhone = encodeURIComponent(waPhone.replace(/^\+/, ''));
+        const apiKey = encodeURIComponent(process.env.WHATSAPP_CALLMEBOT_APIKEY);
+        await axios.get(`https://api.callmebot.com/whatsapp.php?phone=${safePhone}&text=${safeMsg}&apikey=${apiKey}`, { timeout: 15000 });
+      } else {
+        console.info(`💬 WhatsApp not configured. Credentials for ${waPhone} — username: ${username}`);
+      }
+    } catch (e) {
+      console.warn('⚠️ sendWelcomeCredentials WhatsApp failed:', e.message);
+    }
+  }
+
+  // 3. SMS
+  if (waPhone && process.env.OTP_SMS_WEBHOOK_URL) {
+    try {
+      await axios.post(process.env.OTP_SMS_WEBHOOK_URL, {
+        to: waPhone, message: msg, username, password,
+        user: { id: user.id, employeeNumber: user.employeeNumber, name: user.name },
+      }, { timeout: 15000 });
+    } catch (e) {
+      console.warn('⚠️ sendWelcomeCredentials SMS failed:', e.message);
+    }
   }
 }
 
@@ -1489,12 +1593,14 @@ app.post('/api/auth/request-first-login-otp', authenticate, async (req, res) => 
 });
 
 // Authenticated completion of first-login password setup using OTP.
+// Simple first-login password setup — no OTP required.
+// Client is trusted because they just logged in with the temp credentials the admin gave them.
 app.post('/api/auth/complete-first-login', authenticate, async (req, res) => {
   try {
-    const { otp, newPassword } = req.body;
+    const { newPassword } = req.body;
 
-    if (!otp || !newPassword) {
-      return res.status(400).json({ error: 'otp and newPassword are required' });
+    if (!newPassword) {
+      return res.status(400).json({ error: 'newPassword is required' });
     }
 
     if (String(newPassword).length < 6) {
@@ -1505,15 +1611,6 @@ app.post('/api/auth/complete-first-login', authenticate, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (!user.firstLogin) {
       return res.status(400).json({ error: 'First-login flow is already completed' });
-    }
-
-    const result = await validateOtpForUser({
-      user,
-      purpose: OTP_PURPOSE.FIRST_LOGIN,
-      otpCode: otp,
-    });
-    if (!result.ok) {
-      return res.status(result.status).json({ error: result.error });
     }
 
     const hash = await bcrypt.hash(String(newPassword), 10);
@@ -1846,6 +1943,14 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
           role: "CLIENT",
         },
       });
+
+      // Send credentials via all configured channels (best-effort)
+      sendWelcomeCredentials({
+        user,
+        username: user.username,
+        password: tempPassword,
+        phone: form.phoneNumber || '',
+      }).catch((e) => console.warn('⚠️ sendWelcomeCredentials (submit-form) failed:', e.message));
     }
 
     // 7️⃣ Generate placeholder ID card if not exists
@@ -2641,6 +2746,11 @@ app.post('/api/admin/users',
         }
       })
 
+      // Send welcome credentials via all configured channels (best-effort)
+      sendWelcomeCredentials({ user, username, password, phone: null }).catch((e) =>
+        console.warn('⚠️ sendWelcomeCredentials (admin create user) failed:', e.message)
+      );
+
       res.status(201).json(user)
     } catch (err) {
       console.error('❌ POST /api/admin/users error:', err)
@@ -2795,6 +2905,9 @@ app.post('/api/admin/users/:id/reset-password',
 
     try {
       const hash = await bcrypt.hash(String(newPassword), 10);
+      const user = await prisma.user.findUnique({ where: { id } });
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
       await prisma.user.update({
         where: { id },
         data: {
@@ -2809,7 +2922,21 @@ app.post('/api/admin/users/:id/reset-password',
           otpVerifiedAt: null,
         },
       });
-      return res.json({ message: 'Password reset successfully. User must change it on next login.' });
+
+      // Send new credentials via all configured channels (best-effort)
+      const latestSub = await prisma.submission.findFirst({
+        where: { employeeNumber: user.employeeNumber },
+        orderBy: { submittedAt: 'desc' },
+        select: { phoneNumber: true },
+      });
+      sendWelcomeCredentials({
+        user,
+        username: user.username,
+        password: newPassword,
+        phone: latestSub?.phoneNumber || '',
+      }).catch((e) => console.warn('⚠️ sendWelcomeCredentials (reset-password) failed:', e.message));
+
+      return res.json({ message: 'Password reset successfully. Credentials sent to user.' });
     } catch (err) {
       console.error(`❌ POST /api/admin/users/${id}/reset-password error:`, err);
       return res.status(500).json({ error: 'Failed to reset password', details: err.message });
