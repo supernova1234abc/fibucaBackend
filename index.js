@@ -1705,6 +1705,52 @@ app.get('/api/me', authenticate, async (req, res) => {
   res.json({ user })
 })
 
+// PUT /api/profile — update own email / phone / phone2 (cannot delete existing phone)
+app.put('/api/profile', authenticate, async (req, res) => {
+  try {
+    const { email, phone, phone2 } = req.body;
+    const current = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!current) return res.status(404).json({ error: 'User not found' });
+
+    const data = {};
+
+    if (email !== undefined) {
+      const trimmed = String(email).trim();
+      if (trimmed && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+        return res.status(400).json({ error: 'Invalid email address' });
+      }
+      data.email = trimmed || null;
+    }
+
+    if (phone !== undefined) {
+      const trimmed = String(phone).trim();
+      if (!trimmed && current.phone) {
+        return res.status(400).json({ error: 'Cannot remove existing phone number' });
+      }
+      if (trimmed) data.phone = trimmed;
+    }
+
+    if (phone2 !== undefined) {
+      const trimmed = String(phone2).trim();
+      if (!trimmed && current.phone2) {
+        return res.status(400).json({ error: 'Cannot remove existing second phone number' });
+      }
+      if (trimmed) data.phone2 = trimmed;
+    }
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: 'No changes provided' });
+    }
+
+    const updated = await prisma.user.update({ where: { id: req.user.id }, data });
+    const { password: _p, otpCodeHash: _o, ...safe } = updated;
+    return res.json({ user: safe });
+  } catch (err) {
+    console.error('❌ PUT /api/profile error:', err);
+    return res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
 // Runtime mode hints for frontend upload strategy (no auth needed — returns only config).
 app.get('/api/photo-mode', (req, res) => {
   res.json({

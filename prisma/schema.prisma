@@ -12,6 +12,8 @@ model User {
   name           String
   username       String    @unique
   email          String?
+  phone          String?
+  phone2         String?
   password       String
   employeeNumber String    @unique
   role           Role      @default(CLIENT)
