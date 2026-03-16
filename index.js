@@ -35,6 +35,7 @@ const CLOUDINARY_FOLDERS = {
   photos: process.env.CLOUDINARY_PHOTOS_FOLDER || 'photo',      // user-submitted ID card photos
   forms: process.env.CLOUDINARY_FORMS_FOLDER || 'forms',      // PDF forms
   idcards: process.env.CLOUDINARY_IDCARDS_FOLDER || 'id',      // cleaned ID card images
+  complaints: process.env.CLOUDINARY_COMPLAINTS_FOLDER || 'complaints', // complaint reply attachments
   // if you ever want a separate folder for generated PDFs, add here
 };
 
@@ -248,9 +249,13 @@ app.use(
 
 // parse upload size limit from environment or default to 3MB
 const MAX_PHOTO_BYTES = parseInt(process.env.UPLOAD_SIZE_LIMIT || String(50 * 1024 * 1024), 10);
+const MAX_COMPLAINT_ATTACHMENT_BYTES = parseInt(process.env.MAX_COMPLAINT_ATTACHMENT_BYTES || String(10 * 1024 * 1024), 10);
+const MAX_OFFICIAL_DOCUMENT_BYTES = parseInt(process.env.MAX_OFFICIAL_DOCUMENT_BYTES || String(10 * 1024 * 1024), 10);
 
 console.log('🛡️ CORS allowed origins:', allowedOrigins);
 console.log('📦 upload size limit bytes:', MAX_PHOTO_BYTES);
+console.log('📎 complaint attachment max bytes:', MAX_COMPLAINT_ATTACHMENT_BYTES);
+console.log('📄 official document max bytes:', MAX_OFFICIAL_DOCUMENT_BYTES);
 console.log('⚠️ Note: serverless platforms (Vercel) commonly enforce ~4.5MB request body limits; even with 50MB configured here, the platform may reject larger requests before this app runs.');
 
 // memory storage for uploads uses the limit variable now
@@ -266,8 +271,9 @@ const UPLOADS_DIR = path.join(__dirname, "uploads");
 const PHOTOS_UPLOAD_DIR = path.join(UPLOADS_DIR, "photos");
 const FORMS_UPLOAD_DIR = path.join(UPLOADS_DIR, "forms");
 const IDCARDS_UPLOAD_DIR = path.join(UPLOADS_DIR, "idcards");
+const COMPLAINTS_UPLOAD_DIR = path.join(UPLOADS_DIR, "complaints");
 
-[UPLOADS_DIR, PHOTOS_UPLOAD_DIR, FORMS_UPLOAD_DIR, IDCARDS_UPLOAD_DIR].forEach((dir) => {
+[UPLOADS_DIR, PHOTOS_UPLOAD_DIR, FORMS_UPLOAD_DIR, IDCARDS_UPLOAD_DIR, COMPLAINTS_UPLOAD_DIR].forEach((dir) => {
   if (!IS_VERCEL && !fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -276,6 +282,47 @@ const IDCARDS_UPLOAD_DIR = path.join(UPLOADS_DIR, "idcards");
 function buildUploadUrl(req, relativePath) {
   const baseUrl = process.env.BACKEND_URL || `${req.protocol}://${req.get("host")}`;
   return `${baseUrl}/uploads/${String(relativePath).replace(/^\/+/, "")}`;
+}
+
+function isValidHttpUrl(value) {
+  try {
+    const u = new URL(String(value || "").trim());
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch (_) {
+    return false;
+  }
+}
+
+async function uploadComplaintPdf(req, file, complaintId) {
+  const mime = String(file?.mimetype || "").toLowerCase();
+  const original = String(file?.originalname || "").toLowerCase();
+  const isPdf = mime === "application/pdf" || original.endsWith(".pdf");
+
+  if (!isPdf) {
+    throw new Error("Only PDF files are allowed for complaint attachments");
+  }
+
+  if (PHOTO_MODE === "cloudinary" || process.env.VERCEL) {
+    const publicId = `complaint_${complaintId}_${Date.now()}`;
+    const uploadResult = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          resource_type: "raw",
+          folder: cloudFolder(CLOUDINARY_FOLDERS.complaints),
+          public_id: publicId,
+          format: "pdf",
+        },
+        (error, result) => (error ? reject(error) : resolve(result))
+      );
+      streamifier.createReadStream(file.buffer).pipe(stream);
+    });
+    return uploadResult.secure_url;
+  }
+
+  const safeName = `complaint_${complaintId}_${Date.now()}.pdf`;
+  const pdfDiskPath = path.join(COMPLAINTS_UPLOAD_DIR, safeName);
+  await fs.promises.writeFile(pdfDiskPath, file.buffer);
+  return buildUploadUrl(req, `complaints/${safeName}`);
 }
 
 
@@ -781,17 +828,29 @@ app.post(
   "/api/staff/complaints/:id/reply",
   authenticate,
   requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  uploadPDF.single("file"),
   async (req, res) => {
     try {
       const complaintId = Number(req.params.id);
-      const { message } = req.body;
+      const rawMessage = req.body?.message;
+      const rawLink = req.body?.attachmentLink;
+      const message = String(rawMessage || "").trim();
+      const attachmentLink = String(rawLink || "").trim();
 
       if (!complaintId) {
         return res.status(400).json({ error: "Invalid complaint id" });
       }
 
-      if (!message || !String(message).trim()) {
-        return res.status(400).json({ error: "Reply message is required" });
+      if (!message && !req.file && !attachmentLink) {
+        return res.status(400).json({ error: "Reply message, PDF file or attachment link is required" });
+      }
+
+      if (req.file && Number(req.file.size || 0) > MAX_COMPLAINT_ATTACHMENT_BYTES) {
+        return res.status(413).json({ error: "Complaint attachment PDF is too large. Maximum size is 10MB." });
+      }
+
+      if (attachmentLink && !isValidHttpUrl(attachmentLink)) {
+        return res.status(400).json({ error: "attachmentLink must be a valid http(s) URL" });
       }
 
       const complaint = await prisma.complaint.findUnique({
@@ -802,11 +861,27 @@ app.post(
         return res.status(404).json({ error: "Complaint not found" });
       }
 
+      let uploadedFileUrl = "";
+      if (req.file) {
+        try {
+          uploadedFileUrl = await uploadComplaintPdf(req, req.file, complaintId);
+        } catch (uploadErr) {
+          return res.status(400).json({ error: uploadErr.message || "Failed to upload attachment" });
+        }
+      }
+
+      // Keep schema unchanged by storing metadata markers in message.
+      // Frontend strips markers and renders attachment actions.
+      const messageParts = [];
+      if (message) messageParts.push(message);
+      if (uploadedFileUrl) messageParts.push(`__ATTACHMENT_FILE__:${uploadedFileUrl}`);
+      if (attachmentLink) messageParts.push(`__ATTACHMENT_LINK__:${attachmentLink}`);
+
       const reply = await prisma.complaintReply.create({
         data: {
           complaintId,
           senderId: req.user.id,
-          message: String(message).trim(),
+          message: messageParts.join("\n"),
         },
         include: {
           sender: {
@@ -888,18 +963,68 @@ app.post(
   "/api/staff/documents",
   authenticate,
   requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  uploadPDF.single("file"),
   async (req, res) => {
     try {
-      const { title, description, fileUrl } = req.body;
-      if (!title || !fileUrl) {
-        return res.status(400).json({ error: "title and fileUrl are required" });
+      const title = String(req.body?.title || "").trim();
+      const description = req.body?.description ? String(req.body.description).trim() : null;
+      const providedFileUrl = String(req.body?.fileUrl || "").trim();
+
+      if (!title) {
+        return res.status(400).json({ error: "title is required" });
+      }
+
+      if (!req.file && !providedFileUrl) {
+        return res.status(400).json({ error: "Provide either a PDF file or fileUrl" });
+      }
+
+      if (req.file && Number(req.file.size || 0) > MAX_OFFICIAL_DOCUMENT_BYTES) {
+        return res.status(413).json({ error: "Official document PDF is too large. Maximum size is 10MB." });
+      }
+
+      if (providedFileUrl && !isValidHttpUrl(providedFileUrl)) {
+        return res.status(400).json({ error: "fileUrl must be a valid http(s) URL" });
+      }
+
+      let finalFileUrl = providedFileUrl;
+
+      if (req.file) {
+        const mime = String(req.file?.mimetype || "").toLowerCase();
+        const original = String(req.file?.originalname || "").toLowerCase();
+        const isPdf = mime === "application/pdf" || original.endsWith(".pdf");
+
+        if (!isPdf) {
+          return res.status(400).json({ error: "Only PDF files are allowed" });
+        }
+
+        if (PHOTO_MODE === "cloudinary" || process.env.VERCEL) {
+          const publicId = `official_doc_${Date.now()}`;
+          const uploadResult = await new Promise((resolve, reject) => {
+            const stream = cloudinary.uploader.upload_stream(
+              {
+                resource_type: "raw",
+                folder: cloudFolder(CLOUDINARY_FOLDERS.forms),
+                public_id: publicId,
+                format: "pdf",
+              },
+              (error, result) => (error ? reject(error) : resolve(result))
+            );
+            streamifier.createReadStream(req.file.buffer).pipe(stream);
+          });
+          finalFileUrl = uploadResult.secure_url;
+        } else {
+          const safeName = `official_doc_${Date.now()}.pdf`;
+          const pdfDiskPath = path.join(FORMS_UPLOAD_DIR, safeName);
+          await fs.promises.writeFile(pdfDiskPath, req.file.buffer);
+          finalFileUrl = buildUploadUrl(req, `forms/${safeName}`);
+        }
       }
 
       const created = await prisma.officialDocument.create({
         data: {
-          title: String(title).trim(),
-          description: description ? String(description).trim() : null,
-          fileUrl: String(fileUrl).trim(),
+          title,
+          description,
+          fileUrl: finalFileUrl,
           createdById: req.user.id,
         },
       });
