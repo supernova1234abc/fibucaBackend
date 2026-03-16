@@ -107,6 +107,9 @@ model Complaint {
   subject   String
   message   String
   status    ComplaintStatus @default(OPEN)
+  lastActivityAt DateTime   @default(now())
+  clientLastReadAt DateTime?
+  staffLastReadAt DateTime?
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
 
@@ -115,6 +118,7 @@ model Complaint {
 
   @@index([userId])
   @@index([status])
+  @@index([lastActivityAt])
 }
 
 model ComplaintReply {

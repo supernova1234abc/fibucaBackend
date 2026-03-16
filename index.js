@@ -767,6 +767,8 @@ app.post("/api/complaints", authenticate, async (req, res) => {
         userId: req.user.id,
         subject: String(subject).trim(),
         message: String(message).trim(),
+        lastActivityAt: new Date(),
+        clientLastReadAt: new Date(),
       },
     });
 
@@ -799,7 +801,16 @@ app.get("/api/complaints/mine", authenticate, async (req, res) => {
       orderBy: { createdAt: "desc" },
     });
 
-    return res.json(rows);
+    const mapped = rows.map((row) => {
+      const lastActivity = row.lastActivityAt ? new Date(row.lastActivityAt).getTime() : 0;
+      const lastRead = row.clientLastReadAt ? new Date(row.clientLastReadAt).getTime() : 0;
+      return {
+        ...row,
+        unreadForClient: lastActivity > lastRead,
+      };
+    });
+
+    return res.json(mapped);
   } catch (err) {
     console.error("❌ list my complaints error:", err);
     return res.status(500).json({
@@ -841,7 +852,16 @@ app.get(
         orderBy: { createdAt: "desc" },
       });
 
-      return res.json(rows);
+      const mapped = rows.map((row) => {
+        const lastActivity = row.lastActivityAt ? new Date(row.lastActivityAt).getTime() : 0;
+        const lastRead = row.staffLastReadAt ? new Date(row.staffLastReadAt).getTime() : 0;
+        return {
+          ...row,
+          unreadForStaff: lastActivity > lastRead,
+        };
+      });
+
+      return res.json(mapped);
     } catch (err) {
       console.error("❌ staff complaints error:", err);
       return res.status(500).json({
@@ -955,6 +975,14 @@ app.post(
         },
       });
 
+      await prisma.complaint.update({
+        where: { id: complaintId },
+        data: {
+          lastActivityAt: new Date(),
+          staffLastReadAt: new Date(),
+        },
+      });
+
       return res.status(201).json({
         message: "✅ Reply sent",
         reply,
@@ -1007,6 +1035,14 @@ app.put(
         },
       });
 
+      await prisma.complaint.update({
+        where: { id: existing.complaintId },
+        data: {
+          lastActivityAt: new Date(),
+          staffLastReadAt: new Date(),
+        },
+      });
+
       return res.json({ message: "✅ Reply updated", reply: updated });
     } catch (err) {
       console.error("❌ edit complaint reply error:", err);
@@ -1037,10 +1073,54 @@ app.delete(
       });
 
       await prisma.complaintReply.update({ where: { id: replyId }, data: { message: deletedMessage } });
+      await prisma.complaint.update({
+        where: { id: existing.complaintId },
+        data: {
+          lastActivityAt: new Date(),
+          staffLastReadAt: new Date(),
+        },
+      });
       return res.json({ message: "✅ Reply deleted" });
     } catch (err) {
       console.error("❌ delete complaint reply error:", err);
       return res.status(500).json({ error: "Failed to delete reply", details: err.message });
+    }
+  }
+);
+
+app.post(
+  "/api/complaints/mark-read",
+  authenticate,
+  requireRole(["CLIENT"]),
+  async (req, res) => {
+    try {
+      const now = new Date();
+      await prisma.complaint.updateMany({
+        where: { userId: req.user.id },
+        data: { clientLastReadAt: now },
+      });
+      return res.json({ message: "✅ Client complaints marked as read" });
+    } catch (err) {
+      console.error("❌ mark client complaints read error:", err);
+      return res.status(500).json({ error: "Failed to mark complaints as read", details: err.message });
+    }
+  }
+);
+
+app.post(
+  "/api/staff/complaints/mark-read",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const now = new Date();
+      await prisma.complaint.updateMany({
+        data: { staffLastReadAt: now },
+      });
+      return res.json({ message: "✅ Staff complaints marked as read" });
+    } catch (err) {
+      console.error("❌ mark staff complaints read error:", err);
+      return res.status(500).json({ error: "Failed to mark complaints as read", details: err.message });
     }
   }
 );
