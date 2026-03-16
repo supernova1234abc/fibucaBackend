@@ -293,6 +293,67 @@ function isValidHttpUrl(value) {
   }
 }
 
+function parseReplyStorageMessage(raw = "") {
+  const lines = String(raw || "").split(/\r?\n/);
+  let attachmentFileUrl = "";
+  let attachmentLinkUrl = "";
+  let editedAt = "";
+  let deletedAt = "";
+  let deleted = false;
+  const messageLines = [];
+
+  lines.forEach((line) => {
+    if (line.startsWith("__ATTACHMENT_FILE__:")) {
+      attachmentFileUrl = line.replace("__ATTACHMENT_FILE__:", "").trim();
+      return;
+    }
+    if (line.startsWith("__ATTACHMENT_LINK__:")) {
+      attachmentLinkUrl = line.replace("__ATTACHMENT_LINK__:", "").trim();
+      return;
+    }
+    if (line.startsWith("__EDITED_AT__:")) {
+      editedAt = line.replace("__EDITED_AT__:", "").trim();
+      return;
+    }
+    if (line.startsWith("__DELETED__:")) {
+      deleted = line.replace("__DELETED__:", "").trim() === "true";
+      return;
+    }
+    if (line.startsWith("__DELETED_AT__:")) {
+      deletedAt = line.replace("__DELETED_AT__:", "").trim();
+      return;
+    }
+    messageLines.push(line);
+  });
+
+  return {
+    message: messageLines.join("\n").trim(),
+    attachmentFileUrl,
+    attachmentLinkUrl,
+    editedAt,
+    deleted,
+    deletedAt,
+  };
+}
+
+function buildReplyStorageMessage({
+  message = "",
+  attachmentFileUrl = "",
+  attachmentLinkUrl = "",
+  editedAt = "",
+  deleted = false,
+  deletedAt = "",
+}) {
+  const out = [];
+  if (String(message || "").trim()) out.push(String(message).trim());
+  if (String(attachmentFileUrl || "").trim()) out.push(`__ATTACHMENT_FILE__:${String(attachmentFileUrl).trim()}`);
+  if (String(attachmentLinkUrl || "").trim()) out.push(`__ATTACHMENT_LINK__:${String(attachmentLinkUrl).trim()}`);
+  if (String(editedAt || "").trim()) out.push(`__EDITED_AT__:${String(editedAt).trim()}`);
+  if (deleted) out.push(`__DELETED__:true`);
+  if (String(deletedAt || "").trim()) out.push(`__DELETED_AT__:${String(deletedAt).trim()}`);
+  return out.join("\n");
+}
+
 async function uploadComplaintPdf(req, file, complaintId) {
   const mime = String(file?.mimetype || "").toLowerCase();
   const original = String(file?.originalname || "").toLowerCase();
@@ -908,6 +969,82 @@ app.post(
   }
 );
 
+app.put(
+  "/api/staff/complaint-replies/:id",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const replyId = Number(req.params.id);
+      const message = String(req.body?.message || "").trim();
+
+      if (!replyId) return res.status(400).json({ error: "Invalid reply id" });
+      if (!message) return res.status(400).json({ error: "Reply message is required" });
+
+      const existing = await prisma.complaintReply.findUnique({ where: { id: replyId } });
+      if (!existing) return res.status(404).json({ error: "Reply not found" });
+
+      const canManage = existing.senderId === req.user.id || ["ADMIN", "SUPERADMIN"].includes(req.user.role);
+      if (!canManage) return res.status(403).json({ error: "You can only edit your own reply" });
+
+      const parsed = parseReplyStorageMessage(existing.message);
+      if (parsed.deleted) {
+        return res.status(400).json({ error: "Deleted reply cannot be edited" });
+      }
+
+      const nextMessage = buildReplyStorageMessage({
+        message,
+        attachmentFileUrl: parsed.attachmentFileUrl,
+        attachmentLinkUrl: parsed.attachmentLinkUrl,
+        editedAt: new Date().toISOString(),
+      });
+
+      const updated = await prisma.complaintReply.update({
+        where: { id: replyId },
+        data: { message: nextMessage },
+        include: {
+          sender: { select: { id: true, name: true, role: true } },
+        },
+      });
+
+      return res.json({ message: "✅ Reply updated", reply: updated });
+    } catch (err) {
+      console.error("❌ edit complaint reply error:", err);
+      return res.status(500).json({ error: "Failed to edit reply", details: err.message });
+    }
+  }
+);
+
+app.delete(
+  "/api/staff/complaint-replies/:id",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const replyId = Number(req.params.id);
+      if (!replyId) return res.status(400).json({ error: "Invalid reply id" });
+
+      const existing = await prisma.complaintReply.findUnique({ where: { id: replyId } });
+      if (!existing) return res.status(404).json({ error: "Reply not found" });
+
+      const canManage = existing.senderId === req.user.id || ["ADMIN", "SUPERADMIN"].includes(req.user.role);
+      if (!canManage) return res.status(403).json({ error: "You can only delete your own reply" });
+
+      const deletedMessage = buildReplyStorageMessage({
+        message: "",
+        deleted: true,
+        deletedAt: new Date().toISOString(),
+      });
+
+      await prisma.complaintReply.update({ where: { id: replyId }, data: { message: deletedMessage } });
+      return res.json({ message: "✅ Reply deleted" });
+    } catch (err) {
+      console.error("❌ delete complaint reply error:", err);
+      return res.status(500).json({ error: "Failed to delete reply", details: err.message });
+    }
+  }
+);
+
 // =========================
 // OFFICIAL DOCUMENTS + NEWS UPDATES
 // =========================
@@ -1037,6 +1174,64 @@ app.post(
   }
 );
 
+app.put(
+  "/api/staff/documents/:id",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const title = String(req.body?.title || "").trim();
+      const description = req.body?.description ? String(req.body.description).trim() : null;
+      const fileUrl = String(req.body?.fileUrl || "").trim();
+
+      if (!id) return res.status(400).json({ error: "Invalid document id" });
+      if (!title || !fileUrl) return res.status(400).json({ error: "title and fileUrl are required" });
+      if (!isValidHttpUrl(fileUrl)) return res.status(400).json({ error: "fileUrl must be a valid http(s) URL" });
+
+      const existing = await prisma.officialDocument.findUnique({ where: { id } });
+      if (!existing) return res.status(404).json({ error: "Document not found" });
+
+      const canManage = existing.createdById === req.user.id || ["ADMIN", "SUPERADMIN"].includes(req.user.role);
+      if (!canManage) return res.status(403).json({ error: "You can only edit your own document" });
+
+      const updated = await prisma.officialDocument.update({
+        where: { id },
+        data: { title, description, fileUrl },
+      });
+
+      return res.json({ message: "✅ Document updated", document: updated });
+    } catch (err) {
+      console.error("❌ update document error:", err);
+      return res.status(500).json({ error: "Failed to update document", details: err.message });
+    }
+  }
+);
+
+app.delete(
+  "/api/staff/documents/:id",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid document id" });
+
+      const existing = await prisma.officialDocument.findUnique({ where: { id } });
+      if (!existing) return res.status(404).json({ error: "Document not found" });
+
+      const canManage = existing.createdById === req.user.id || ["ADMIN", "SUPERADMIN"].includes(req.user.role);
+      if (!canManage) return res.status(403).json({ error: "You can only delete your own document" });
+
+      await prisma.officialDocument.delete({ where: { id } });
+      return res.json({ message: "✅ Document deleted" });
+    } catch (err) {
+      console.error("❌ delete document error:", err);
+      return res.status(500).json({ error: "Failed to delete document", details: err.message });
+    }
+  }
+);
+
 // STAFF/ADMIN: publish news update
 app.post(
   "/api/staff/updates",
@@ -1062,6 +1257,63 @@ app.post(
     } catch (err) {
       console.error("❌ create update error:", err);
       return res.status(500).json({ error: "Failed to publish update", details: err.message });
+    }
+  }
+);
+
+app.put(
+  "/api/staff/updates/:id",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const title = String(req.body?.title || "").trim();
+      const message = String(req.body?.message || "").trim();
+      const category = req.body?.category ? String(req.body.category).trim() : null;
+
+      if (!id) return res.status(400).json({ error: "Invalid update id" });
+      if (!title || !message) return res.status(400).json({ error: "title and message are required" });
+
+      const existing = await prisma.officialUpdate.findUnique({ where: { id } });
+      if (!existing) return res.status(404).json({ error: "Update not found" });
+
+      const canManage = existing.createdById === req.user.id || ["ADMIN", "SUPERADMIN"].includes(req.user.role);
+      if (!canManage) return res.status(403).json({ error: "You can only edit your own update" });
+
+      const updated = await prisma.officialUpdate.update({
+        where: { id },
+        data: { title, message, category },
+      });
+
+      return res.json({ message: "✅ Update edited", update: updated });
+    } catch (err) {
+      console.error("❌ update news error:", err);
+      return res.status(500).json({ error: "Failed to edit update", details: err.message });
+    }
+  }
+);
+
+app.delete(
+  "/api/staff/updates/:id",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid update id" });
+
+      const existing = await prisma.officialUpdate.findUnique({ where: { id } });
+      if (!existing) return res.status(404).json({ error: "Update not found" });
+
+      const canManage = existing.createdById === req.user.id || ["ADMIN", "SUPERADMIN"].includes(req.user.role);
+      if (!canManage) return res.status(403).json({ error: "You can only delete your own update" });
+
+      await prisma.officialUpdate.delete({ where: { id } });
+      return res.json({ message: "✅ Update deleted" });
+    } catch (err) {
+      console.error("❌ delete news error:", err);
+      return res.status(500).json({ error: "Failed to delete update", details: err.message });
     }
   }
 );
