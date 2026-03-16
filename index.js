@@ -1169,6 +1169,8 @@ function isPlaceholderConfig(value = '') {
     'your-email@gmail.com',
     'your-app-password-here',
     'your-callmebot-apikey-here',
+    'your-meta-whatsapp-token-here',
+    'your-meta-phone-number-id-here',
     'changeme',
     'example',
     'placeholder',
@@ -1190,6 +1192,43 @@ function hasUsableWhatsappConfig() {
   return Boolean(
     process.env.WHATSAPP_CALLMEBOT_APIKEY &&
     !isPlaceholderConfig(process.env.WHATSAPP_CALLMEBOT_APIKEY)
+  );
+}
+
+function hasUsableWhatsappMetaConfig() {
+  return Boolean(
+    process.env.WHATSAPP_META_TOKEN &&
+    process.env.WHATSAPP_META_PHONE_NUMBER_ID &&
+    !isPlaceholderConfig(process.env.WHATSAPP_META_TOKEN) &&
+    !isPlaceholderConfig(process.env.WHATSAPP_META_PHONE_NUMBER_ID)
+  );
+}
+
+function getWhatsappProviderPreference() {
+  const provider = String(process.env.OTP_WHATSAPP_PROVIDER || 'AUTO').trim().toUpperCase();
+  return ['AUTO', 'META', 'CALLMEBOT', 'WEBHOOK'].includes(provider) ? provider : 'AUTO';
+}
+
+async function sendWhatsappViaMeta({ to, message }) {
+  const token = String(process.env.WHATSAPP_META_TOKEN || '').trim();
+  const phoneNumberId = String(process.env.WHATSAPP_META_PHONE_NUMBER_ID || '').trim();
+  const recipient = String(to || '').replace(/[^\d]/g, '');
+
+  await axios.post(
+    `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to: recipient,
+      type: 'text',
+      text: { body: message, preview_url: false },
+    },
+    {
+      timeout: 15000,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    }
   );
 }
 
@@ -1295,8 +1334,10 @@ async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
   }
 
   if (channel === OTP_CHANNEL.WHATSAPP) {
+    const providerPref = getWhatsappProviderPreference();
+
     // 1. Custom webhook
-    if (process.env.OTP_WHATSAPP_WEBHOOK_URL) {
+    if ((providerPref === 'AUTO' || providerPref === 'WEBHOOK') && process.env.OTP_WHATSAPP_WEBHOOK_URL) {
       await axios.post(process.env.OTP_WHATSAPP_WEBHOOK_URL, {
         to: target,
         message: msg,
@@ -1307,8 +1348,14 @@ async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
       return { deliveryMode: 'webhook' };
     }
 
-    // 2. CallMeBot
-    if (hasUsableWhatsappConfig()) {
+    // 2. Meta WhatsApp Cloud API
+    if ((providerPref === 'AUTO' || providerPref === 'META') && hasUsableWhatsappMetaConfig()) {
+      await sendWhatsappViaMeta({ to: target, message: msg });
+      return { deliveryMode: 'meta' };
+    }
+
+    // 3. CallMeBot
+    if ((providerPref === 'AUTO' || providerPref === 'CALLMEBOT') && hasUsableWhatsappConfig()) {
       const safeMsg = encodeURIComponent(msg);
       const safePhone = encodeURIComponent(target.replace(/^\+/, ''));
       const apiKey = encodeURIComponent(process.env.WHATSAPP_CALLMEBOT_APIKEY);
@@ -1325,7 +1372,7 @@ async function sendOtpMessage({ user, channel, purpose, otpCode, target }) {
     }
 
     // No provider — fail loudly
-    throw new Error('WhatsApp not configured. Add WHATSAPP_CALLMEBOT_APIKEY (or OTP_WHATSAPP_WEBHOOK_URL) to your .env file.');
+    throw new Error('WhatsApp not configured. Add Meta (WHATSAPP_META_TOKEN + WHATSAPP_META_PHONE_NUMBER_ID), CallMeBot, or OTP_WHATSAPP_WEBHOOK_URL to your .env file.');
   }
 
   if (channel === OTP_CHANNEL.SMS) {
@@ -1401,12 +1448,16 @@ async function sendWelcomeCredentials({ user, username, password, phone }) {
   const waPhone = normalizePhone(phone || '');
   if (waPhone) {
     try {
-      if (process.env.OTP_WHATSAPP_WEBHOOK_URL) {
+      const providerPref = getWhatsappProviderPreference();
+
+      if ((providerPref === 'AUTO' || providerPref === 'WEBHOOK') && process.env.OTP_WHATSAPP_WEBHOOK_URL) {
         await axios.post(process.env.OTP_WHATSAPP_WEBHOOK_URL, {
           to: waPhone, message: msg, username, password,
           user: { id: user.id, employeeNumber: user.employeeNumber, name: user.name },
         }, { timeout: 15000 });
-      } else if (hasUsableWhatsappConfig()) {
+      } else if ((providerPref === 'AUTO' || providerPref === 'META') && hasUsableWhatsappMetaConfig()) {
+        await sendWhatsappViaMeta({ to: waPhone, message: msg });
+      } else if ((providerPref === 'AUTO' || providerPref === 'CALLMEBOT') && hasUsableWhatsappConfig()) {
         const safeMsg = encodeURIComponent(msg);
         const safePhone = encodeURIComponent(waPhone.replace(/^\+/, ''));
         const apiKey = encodeURIComponent(process.env.WHATSAPP_CALLMEBOT_APIKEY);
@@ -1502,10 +1553,10 @@ app.post('/api/auth/request-otp', async (req, res) => {
   try {
     const { identifier, purpose, channel } = req.body;
     const otpPurpose = String(purpose || '').trim().toUpperCase();
-    const otpChannel = String(channel || '').trim().toUpperCase();
+    const otpChannel = String(channel || OTP_CHANNEL.EMAIL).trim().toUpperCase();
 
-    if (!identifier || !otpPurpose || !otpChannel) {
-      return res.status(400).json({ error: 'identifier, purpose and channel are required' });
+    if (!identifier || !otpPurpose) {
+      return res.status(400).json({ error: 'identifier and purpose are required' });
     }
 
     if (!Object.values(OTP_PURPOSE).includes(otpPurpose)) {
@@ -1525,34 +1576,63 @@ app.post('/api/auth/request-otp', async (req, res) => {
       return res.status(400).json({ error: 'First-login OTP is not required for this account' });
     }
 
+    let effectiveChannel = otpChannel;
     let target = '';
-    if (otpChannel === OTP_CHANNEL.EMAIL) {
-      if (!user.email) {
-        return res.status(400).json({ error: 'This account has no email configured' });
+    const whatsappPhone = await resolveWhatsappPhoneForUser(user);
+
+    if (effectiveChannel === OTP_CHANNEL.EMAIL) {
+      if (user.email) {
+        target = user.email;
+      } else if (whatsappPhone) {
+        effectiveChannel = OTP_CHANNEL.WHATSAPP;
+        target = whatsappPhone;
+      } else {
+        return res.status(400).json({ error: 'This account has no email or WhatsApp phone configured' });
       }
-      target = user.email;
     } else {
-      target = await resolveWhatsappPhoneForUser(user);
-      if (!target) {
-        return res.status(400).json({ error: 'No WhatsApp phone found for this account' });
+      if (whatsappPhone) {
+        target = whatsappPhone;
+      } else if (user.email) {
+        effectiveChannel = OTP_CHANNEL.EMAIL;
+        target = user.email;
+      } else {
+        return res.status(400).json({ error: 'No WhatsApp phone or email found for this account' });
       }
     }
 
     const otpCode = generateOtpCode();
-    const expiresAt = await persistOtpForUser({
+    let expiresAt = await persistOtpForUser({
       userId: user.id,
       purpose: otpPurpose,
-      channel: otpChannel,
+      channel: effectiveChannel,
       target,
       otpCode,
     });
 
-    const delivery = await sendOtpMessage({ user, channel: otpChannel, purpose: otpPurpose, otpCode, target });
+    let delivery;
+    try {
+      delivery = await sendOtpMessage({ user, channel: effectiveChannel, purpose: otpPurpose, otpCode, target });
+    } catch (primaryErr) {
+      if (effectiveChannel === OTP_CHANNEL.WHATSAPP && user.email) {
+        effectiveChannel = OTP_CHANNEL.EMAIL;
+        target = user.email;
+        expiresAt = await persistOtpForUser({
+          userId: user.id,
+          purpose: otpPurpose,
+          channel: effectiveChannel,
+          target,
+          otpCode,
+        });
+        delivery = await sendOtpMessage({ user, channel: effectiveChannel, purpose: otpPurpose, otpCode, target });
+      } else {
+        throw primaryErr;
+      }
+    }
 
-    const maskedTarget = otpChannel === OTP_CHANNEL.EMAIL ? maskEmail(target) : maskPhone(target);
+    const maskedTarget = effectiveChannel === OTP_CHANNEL.EMAIL ? maskEmail(target) : maskPhone(target);
     const payload = {
-      message: `OTP sent via ${otpChannel}`,
-      channel: otpChannel,
+      message: `OTP sent via ${effectiveChannel}`,
+      channel: effectiveChannel,
       target: maskedTarget,
       expiresAt,
     };
@@ -1654,8 +1734,8 @@ app.post('/api/auth/reset-password-with-otp', async (req, res) => {
 // Authenticated first-login OTP request (for users who already logged in once with temp password).
 app.post('/api/auth/request-first-login-otp', authenticate, async (req, res) => {
   try {
-    const channel = String(req.body?.channel || '').trim().toUpperCase();
-    if (!Object.values(OTP_CHANNEL).includes(channel)) {
+    const requestedChannel = String(req.body?.channel || OTP_CHANNEL.EMAIL).trim().toUpperCase();
+    if (!Object.values(OTP_CHANNEL).includes(requestedChannel)) {
       return res.status(400).json({ error: 'Unsupported OTP channel' });
     }
 
@@ -1665,17 +1745,32 @@ app.post('/api/auth/request-first-login-otp', authenticate, async (req, res) => 
       return res.status(400).json({ error: 'First-login OTP is not required for this account' });
     }
 
+    let channel = requestedChannel;
     let target = '';
+    const whatsappPhone = await resolveWhatsappPhoneForUser(user);
+
     if (channel === OTP_CHANNEL.EMAIL) {
-      if (!user.email) return res.status(400).json({ error: 'No email configured for this account' });
-      target = user.email;
+      if (user.email) {
+        target = user.email;
+      } else if (whatsappPhone) {
+        channel = OTP_CHANNEL.WHATSAPP;
+        target = whatsappPhone;
+      } else {
+        return res.status(400).json({ error: 'No email or WhatsApp phone configured for this account' });
+      }
     } else {
-      target = await resolveWhatsappPhoneForUser(user);
-      if (!target) return res.status(400).json({ error: 'No WhatsApp phone found for this account' });
+      if (whatsappPhone) {
+        target = whatsappPhone;
+      } else if (user.email) {
+        channel = OTP_CHANNEL.EMAIL;
+        target = user.email;
+      } else {
+        return res.status(400).json({ error: 'No WhatsApp phone or email configured for this account' });
+      }
     }
 
     const otpCode = generateOtpCode();
-    const expiresAt = await persistOtpForUser({
+    let expiresAt = await persistOtpForUser({
       userId: user.id,
       purpose: OTP_PURPOSE.FIRST_LOGIN,
       channel,
@@ -1683,7 +1778,25 @@ app.post('/api/auth/request-first-login-otp', authenticate, async (req, res) => 
       otpCode,
     });
 
-    const delivery = await sendOtpMessage({ user, channel, purpose: OTP_PURPOSE.FIRST_LOGIN, otpCode, target });
+    let delivery;
+    try {
+      delivery = await sendOtpMessage({ user, channel, purpose: OTP_PURPOSE.FIRST_LOGIN, otpCode, target });
+    } catch (primaryErr) {
+      if (channel === OTP_CHANNEL.WHATSAPP && user.email) {
+        channel = OTP_CHANNEL.EMAIL;
+        target = user.email;
+        expiresAt = await persistOtpForUser({
+          userId: user.id,
+          purpose: OTP_PURPOSE.FIRST_LOGIN,
+          channel,
+          target,
+          otpCode,
+        });
+        delivery = await sendOtpMessage({ user, channel, purpose: OTP_PURPOSE.FIRST_LOGIN, otpCode, target });
+      } else {
+        throw primaryErr;
+      }
+    }
 
     const payload = {
       message: `OTP sent via ${channel}`,
