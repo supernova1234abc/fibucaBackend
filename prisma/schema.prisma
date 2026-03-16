@@ -37,6 +37,8 @@ model User {
   complaintReplies ComplaintReply[]
   transfers        TransferHistory[] @relation("TransferUser")
   transfersMade    TransferHistory[] @relation("TransferBy")
+  publishedDocuments OfficialDocument[]
+  publishedUpdates   OfficialUpdate[]
 }
 
 model StaffLink {
@@ -167,4 +169,32 @@ enum Role {
   ADMIN
   STAFF
   SUPERADMIN
+}
+
+model OfficialDocument {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String?
+  fileUrl     String
+  createdAt   DateTime @default(now())
+
+  createdById Int
+  createdBy   User @relation(fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([createdById])
+  @@index([createdAt])
+}
+
+model OfficialUpdate {
+  id        Int      @id @default(autoincrement())
+  title     String
+  message   String
+  category  String?
+  createdAt DateTime @default(now())
+
+  createdById Int
+  createdBy   User @relation(fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([createdById])
+  @@index([createdAt])
 }

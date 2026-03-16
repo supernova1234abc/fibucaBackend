@@ -834,6 +834,114 @@ app.post(
 );
 
 // =========================
+// OFFICIAL DOCUMENTS + NEWS UPDATES
+// =========================
+
+// CLIENT/STAFF/ADMIN: list official documents
+app.get(
+  "/api/client/documents",
+  authenticate,
+  requireRole(["CLIENT", "STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const rows = await prisma.officialDocument.findMany({
+        include: {
+          createdBy: {
+            select: { id: true, name: true, role: true },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      return res.json(rows);
+    } catch (err) {
+      console.error("❌ list documents error:", err);
+      return res.status(500).json({ error: "Failed to fetch documents", details: err.message });
+    }
+  }
+);
+
+// CLIENT/STAFF/ADMIN: list official updates/news
+app.get(
+  "/api/client/updates",
+  authenticate,
+  requireRole(["CLIENT", "STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const rows = await prisma.officialUpdate.findMany({
+        include: {
+          createdBy: {
+            select: { id: true, name: true, role: true },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      return res.json(rows);
+    } catch (err) {
+      console.error("❌ list updates error:", err);
+      return res.status(500).json({ error: "Failed to fetch updates", details: err.message });
+    }
+  }
+);
+
+// STAFF/ADMIN: publish official document
+app.post(
+  "/api/staff/documents",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const { title, description, fileUrl } = req.body;
+      if (!title || !fileUrl) {
+        return res.status(400).json({ error: "title and fileUrl are required" });
+      }
+
+      const created = await prisma.officialDocument.create({
+        data: {
+          title: String(title).trim(),
+          description: description ? String(description).trim() : null,
+          fileUrl: String(fileUrl).trim(),
+          createdById: req.user.id,
+        },
+      });
+
+      return res.status(201).json({ message: "✅ Document published", document: created });
+    } catch (err) {
+      console.error("❌ create document error:", err);
+      return res.status(500).json({ error: "Failed to publish document", details: err.message });
+    }
+  }
+);
+
+// STAFF/ADMIN: publish news update
+app.post(
+  "/api/staff/updates",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const { title, message, category } = req.body;
+      if (!title || !message) {
+        return res.status(400).json({ error: "title and message are required" });
+      }
+
+      const created = await prisma.officialUpdate.create({
+        data: {
+          title: String(title).trim(),
+          message: String(message).trim(),
+          category: category ? String(category).trim() : null,
+          createdById: req.user.id,
+        },
+      });
+
+      return res.status(201).json({ message: "✅ Update published", update: created });
+    } catch (err) {
+      console.error("❌ create update error:", err);
+      return res.status(500).json({ error: "Failed to publish update", details: err.message });
+    }
+  }
+);
+
+// =========================
 // ✅ TRANSFER (change employeeNumber + history)
 // =========================
 
@@ -2057,7 +2165,8 @@ app.post(
     try {
       const { hoursValid, maxUses } = req.body;
 
-      const token = crypto.randomBytes(32).toString("hex");
+      // Short, URL-safe code (still cryptographically random)
+      const token = crypto.randomBytes(12).toString("base64url");
 
       const expiresAt = new Date(
         Date.now() + (hoursValid || 24) * 60 * 60 * 1000
@@ -2089,6 +2198,7 @@ app.post(
 
       res.json({
         message: "✅ Link created",
+        code: token,
         link: `${frontendUrl}/submission/${token}`,
         expiresAt,
         maxUses: link.maxUses,
