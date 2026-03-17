@@ -3924,6 +3924,121 @@ app.get('/submissions/archived/list', authenticate, requireRole(['ADMIN', 'SUPER
   }
 })
 
+// PATCH /submissions/:id/restore -> restore soft-deleted submission
+app.patch('/submissions/:id/restore', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const id = Number(req.params.id)
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid submission ID' })
+
+  try {
+    const existing = await prisma.submission.findUnique({ where: { id } })
+
+    if (!existing) return res.status(404).json({ error: 'Submission not found' })
+    if (!existing.deletedAt) return res.status(409).json({ error: 'Submission is not archived' })
+
+    await prisma.submission.update({
+      where: { id },
+      data: { deletedAt: null }
+    })
+
+    res.json({ message: 'Submission restored successfully', id })
+  } catch (err) {
+    console.error(`❌ PATCH /submissions/${id}/restore error:`, err)
+    res.status(500).json({ error: 'Failed to restore submission', details: err.message })
+  }
+})
+
+// DELETE /submissions/:id/permanent -> permanently delete archived submission (admin only)
+app.delete('/submissions/:id/permanent', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const id = Number(req.params.id)
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid submission ID' })
+
+  try {
+    const existing = await prisma.submission.findUnique({ where: { id } })
+
+    if (!existing) return res.status(404).json({ error: 'Submission not found' })
+    if (!existing.deletedAt) return res.status(409).json({ error: 'Only archived submissions can be permanently deleted' })
+
+    await prisma.submission.delete({ where: { id } })
+
+    res.json({ message: 'Submission permanently deleted', id })
+  } catch (err) {
+    console.error(`❌ DELETE /submissions/${id}/permanent error:`, err)
+    res.status(500).json({ error: 'Failed to permanently delete submission', details: err.message })
+  }
+})
+
+// GET /api/admin/users/archived/list -> fetch soft-deleted users (admin only)
+app.get('/api/admin/users/archived/list', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  try {
+    const archived = await prisma.user.findMany({
+      where: { deletedAt: { not: null } },
+      select: {
+        id: true,
+        name: true,
+        username: true,
+        email: true,
+        employeeNumber: true,
+        role: true,
+        deletedAt: true,
+        submissions: { select: { id: true } }
+      },
+      orderBy: { deletedAt: 'desc' }
+    })
+
+    res.json(archived.map(u => ({
+      ...u,
+      submissionsCount: u.submissions.length,
+      submissions: undefined
+    })))
+  } catch (err) {
+    console.error('❌ GET /api/admin/users/archived/list error:', err)
+    res.status(500).json({ error: 'Failed to fetch archived users', details: err.message })
+  }
+})
+
+// PATCH /api/admin/users/:id/restore -> restore soft-deleted user
+app.patch('/api/admin/users/:id/restore', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const id = Number(req.params.id)
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid user ID' })
+
+  try {
+    const existing = await prisma.user.findUnique({ where: { id } })
+
+    if (!existing) return res.status(404).json({ error: 'User not found' })
+    if (!existing.deletedAt) return res.status(409).json({ error: 'User is not archived' })
+
+    await prisma.user.update({
+      where: { id },
+      data: { deletedAt: null }
+    })
+
+    res.json({ message: 'User restored successfully', id })
+  } catch (err) {
+    console.error(`❌ PATCH /api/admin/users/${id}/restore error:`, err)
+    res.status(500).json({ error: 'Failed to restore user', details: err.message })
+  }
+})
+
+// DELETE /api/admin/users/:id/permanent -> permanently delete archived user (admin only)
+app.delete('/api/admin/users/:id/permanent', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const id = Number(req.params.id)
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid user ID' })
+
+  try {
+    const existing = await prisma.user.findUnique({ where: { id } })
+
+    if (!existing) return res.status(404).json({ error: 'User not found' })
+    if (!existing.deletedAt) return res.status(409).json({ error: 'Only archived users can be permanently deleted' })
+
+    await prisma.user.delete({ where: { id } })
+
+    res.json({ message: 'User permanently deleted', id })
+  } catch (err) {
+    console.error(`❌ DELETE /api/admin/users/${id}/permanent error:`, err)
+    res.status(500).json({ error: 'Failed to permanently delete user', details: err.message })
+  }
+})
+
 // (photos directory is now served above; cleaned images saved locally)
 
 /**
