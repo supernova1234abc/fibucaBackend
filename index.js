@@ -3726,7 +3726,10 @@ app.get('/submissions', authenticate, async (req, res) => {
   try {
     if (req.user.role === 'CLIENT') {
       const subs = await prisma.submission.findMany({
-        where: { employeeNumber: req.user.employeeNumber },
+        where: {
+          employeeNumber: req.user.employeeNumber,
+          deletedAt: null
+        },
         orderBy: { submittedAt: 'desc' }
       })
       return res.json(subs)
@@ -3734,6 +3737,7 @@ app.get('/submissions', authenticate, async (req, res) => {
 
     // ADMIN / SUPERADMIN -> all
     const subs = await prisma.submission.findMany({
+      where: { deletedAt: null },
       orderBy: { submittedAt: 'desc' }
     })
     res.json(subs)
@@ -3758,6 +3762,7 @@ app.get(
       } = req.query;
 
       const where = {};
+      where.deletedAt = null;
 
       if (employerName) {
         where.employerName = {
@@ -3847,8 +3852,47 @@ app.delete('/submissions/:id', authenticate, async (req, res) => {
   }
 
   try {
-    await prisma.submission.delete({ where: { id } })
-    res.json({ message: 'Submission deleted', id })
+    const existing = await prisma.submission.findUnique({
+      where: { id },
+      include: {
+        user: {
+          select: {
+            id: true,
+            deletedAt: true
+          }
+        }
+      }
+    })
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Submission not found' })
+    }
+
+    if (existing.deletedAt) {
+      return res.status(409).json({ error: 'Submission is already deleted' })
+    }
+
+    // Safety rule: submission deletion is allowed only after linked user is safely deleted.
+    if (existing.userId && existing.user && !existing.user.deletedAt) {
+      return res.status(409).json({
+        error: 'Cannot delete submission while user account is active. Delete the user first from Admin Users for safe tracking.'
+      })
+    }
+
+    const deletedAt = new Date()
+    await prisma.submission.update({
+      where: { id },
+      data: {
+        deletedAt,
+        userDeletedAt: existing.user?.deletedAt || existing.userDeletedAt || null
+      }
+    })
+
+    res.json({
+      message: 'Submission soft-deleted successfully',
+      id,
+      deletedAt: deletedAt.toISOString()
+    })
   } catch (err) {
     console.error(`❌ DELETE /submissions/${id} error:`, err)
     res.status(500).json({ error: 'Failed to delete submission' })
