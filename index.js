@@ -1402,6 +1402,138 @@ app.delete(
 // ✅ TRANSFER (change employeeNumber + history)
 // =========================
 
+function parseTransferNoticeMessage(raw = "") {
+  const text = String(raw || "");
+  const lines = text.split(/\r?\n/).map((l) => l.trim());
+  const map = {};
+
+  lines.forEach((line) => {
+    const idx = line.indexOf(":");
+    if (idx <= 0) return;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    if (key) map[key] = value;
+  });
+
+  return {
+    transferType: map["Transfer Type"] || "",
+    oldEmployeeNumber: map["Old Employee Number"] || "",
+    newEmployeeNumber: map["New Employee Number"] || "",
+    newEmployerName: map["New Employer/Bank"] || "",
+    newBranchName: map["New Branch"] || "",
+    workstation: map["New Workstation"] || "",
+    reasonNote: map["Reason/Note"] || "",
+  };
+}
+
+async function executeTransferForUser({ userId, performedById, newEmployeeNumber, newEmployerName, newBranchName, newPhoneNumber, note }) {
+  if (!userId) {
+    const err = new Error("Invalid user id");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!newEmployeeNumber) {
+    const err = new Error("newEmployeeNumber is required");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const target = await prisma.user.findUnique({ where: { id: userId } });
+  if (!target) {
+    const err = new Error("User not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (target.role !== "CLIENT") {
+    const err = new Error("Only CLIENT users can be transferred");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const existingSubmission = await prisma.submission.findFirst({
+    where: { employeeNumber: target.employeeNumber },
+    orderBy: { submittedAt: "desc" },
+  });
+
+  const trimmedNewEmployeeNumber = String(newEmployeeNumber).trim();
+  const trimmedNewEmployerName = newEmployerName ? String(newEmployerName).trim() : null;
+  const trimmedNewBranchName = newBranchName ? String(newBranchName).trim() : null;
+  const trimmedNewPhoneNumber = newPhoneNumber ? String(newPhoneNumber).trim() : null;
+  const trimmedNote = note ? String(note).trim() : null;
+
+  if (trimmedNewEmployeeNumber !== target.employeeNumber) {
+    const existingUser = await prisma.user.findUnique({ where: { employeeNumber: trimmedNewEmployeeNumber } });
+    if (existingUser) {
+      const err = new Error("newEmployeeNumber already exists");
+      err.statusCode = 409;
+      throw err;
+    }
+
+    const existingSubmissionWithNewNumber = await prisma.submission.findUnique({
+      where: { employeeNumber: trimmedNewEmployeeNumber },
+    });
+    if (existingSubmissionWithNewNumber) {
+      const err = new Error("Submission already exists for newEmployeeNumber");
+      err.statusCode = 409;
+      throw err;
+    }
+  }
+
+  const oldEmployeeNumber = target.employeeNumber;
+  const oldEmployerName = existingSubmission?.employerName || null;
+  const oldBranchName = existingSubmission?.branchName || null;
+  const oldPhoneNumber = existingSubmission?.phoneNumber || null;
+
+  const result = await prisma.$transaction(async (tx) => {
+    const history = await tx.transferHistory.create({
+      data: {
+        userId: target.id,
+        performedById,
+        oldEmployerName,
+        newEmployerName: trimmedNewEmployerName,
+        oldBranchName,
+        newBranchName: trimmedNewBranchName,
+        oldPhoneNumber,
+        newPhoneNumber: trimmedNewPhoneNumber,
+        oldEmployeeNumber,
+        newEmployeeNumber: trimmedNewEmployeeNumber,
+        note: trimmedNote,
+      },
+    });
+
+    const updatedUser = await tx.user.update({
+      where: { id: target.id },
+      data: {
+        employeeNumber: trimmedNewEmployeeNumber,
+        username: trimmedNewEmployeeNumber,
+      },
+      select: {
+        id: true,
+        name: true,
+        employeeNumber: true,
+        username: true,
+        role: true,
+      },
+    });
+
+    await tx.submission.updateMany({
+      where: { employeeNumber: oldEmployeeNumber },
+      data: {
+        employeeNumber: trimmedNewEmployeeNumber,
+        employerName: trimmedNewEmployerName ?? undefined,
+        branchName: trimmedNewBranchName ?? undefined,
+        phoneNumber: trimmedNewPhoneNumber ?? undefined,
+      },
+    });
+
+    return { history, updatedUser };
+  });
+
+  return result;
+}
+
 // ADMIN/STAFF can transfer a CLIENT (bank change etc.)
 app.post(
   "/api/users/:id/transfer",
@@ -1421,98 +1553,14 @@ app.post(
       if (!userId) {
         return res.status(400).json({ error: "Invalid user id" });
       }
-
-      if (!newEmployeeNumber) {
-        return res.status(400).json({ error: "newEmployeeNumber is required" });
-      }
-
-      const target = await prisma.user.findUnique({
-        where: { id: userId },
-      });
-
-      if (!target) {
-        return res.status(404).json({ error: "User not found" });
-      }
-
-      if (target.role !== "CLIENT") {
-        return res.status(400).json({ error: "Only CLIENT users can be transferred" });
-      }
-
-      const existingSubmission = await prisma.submission.findFirst({
-        where: { employeeNumber: target.employeeNumber },
-        orderBy: { submittedAt: "desc" },
-      });
-
-      const trimmedNewEmployeeNumber = String(newEmployeeNumber).trim();
-      const trimmedNewEmployerName = newEmployerName ? String(newEmployerName).trim() : null;
-      const trimmedNewBranchName = newBranchName ? String(newBranchName).trim() : null;
-      const trimmedNewPhoneNumber = newPhoneNumber ? String(newPhoneNumber).trim() : null;
-      const trimmedNote = note ? String(note).trim() : null;
-
-      if (trimmedNewEmployeeNumber !== target.employeeNumber) {
-        const existingUser = await prisma.user.findUnique({
-          where: { employeeNumber: trimmedNewEmployeeNumber },
-        });
-        if (existingUser) {
-          return res.status(409).json({ error: "newEmployeeNumber already exists" });
-        }
-
-        const existingSubmissionWithNewNumber = await prisma.submission.findUnique({
-          where: { employeeNumber: trimmedNewEmployeeNumber },
-        });
-        if (existingSubmissionWithNewNumber) {
-          return res.status(409).json({ error: "Submission already exists for newEmployeeNumber" });
-        }
-      }
-
-      const oldEmployeeNumber = target.employeeNumber;
-      const oldEmployerName = existingSubmission?.employerName || null;
-      const oldBranchName = existingSubmission?.branchName || null;
-      const oldPhoneNumber = existingSubmission?.phoneNumber || null;
-
-      const result = await prisma.$transaction(async (tx) => {
-        const history = await tx.transferHistory.create({
-          data: {
-            userId: target.id,
-            performedById: req.user.id,
-            oldEmployerName,
-            newEmployerName: trimmedNewEmployerName,
-            oldBranchName,
-            newBranchName: trimmedNewBranchName,
-            oldPhoneNumber,
-            newPhoneNumber: trimmedNewPhoneNumber,
-            oldEmployeeNumber,
-            newEmployeeNumber: trimmedNewEmployeeNumber,
-            note: trimmedNote,
-          },
-        });
-
-        const updatedUser = await tx.user.update({
-          where: { id: target.id },
-          data: {
-            employeeNumber: trimmedNewEmployeeNumber,
-            username: trimmedNewEmployeeNumber,
-          },
-          select: {
-            id: true,
-            name: true,
-            employeeNumber: true,
-            username: true,
-            role: true,
-          },
-        });
-
-        await tx.submission.updateMany({
-          where: { employeeNumber: oldEmployeeNumber },
-          data: {
-            employeeNumber: trimmedNewEmployeeNumber,
-            employerName: trimmedNewEmployerName ?? undefined,
-            branchName: trimmedNewBranchName ?? undefined,
-            phoneNumber: trimmedNewPhoneNumber ?? undefined,
-          },
-        });
-
-        return { history, updatedUser };
+      const result = await executeTransferForUser({
+        userId,
+        performedById: req.user.id,
+        newEmployeeNumber,
+        newEmployerName,
+        newBranchName,
+        newPhoneNumber,
+        note,
       });
 
       return res.json({
@@ -1522,6 +1570,10 @@ app.post(
       });
     } catch (err) {
       console.error("❌ transfer error:", err);
+
+      if (err.statusCode) {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
 
       if (err.code === "P2002") {
         return res.status(409).json({
@@ -1534,6 +1586,118 @@ app.post(
         error: "Transfer failed",
         details: err.message,
       });
+    }
+  }
+);
+
+app.post(
+  "/api/staff/complaints/:id/approve-transfer",
+  authenticate,
+  requireRole(["STAFF", "ADMIN", "SUPERADMIN"]),
+  async (req, res) => {
+    try {
+      const complaintId = Number(req.params.id);
+      if (!complaintId) return res.status(400).json({ error: "Invalid complaint id" });
+
+      const complaint = await prisma.complaint.findUnique({
+        where: { id: complaintId },
+        include: {
+          user: {
+            select: { id: true, name: true, employeeNumber: true, role: true },
+          },
+          replies: {
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      });
+
+      if (!complaint) return res.status(404).json({ error: "Complaint not found" });
+      if (!complaint.user) return res.status(400).json({ error: "Complaint has no linked user" });
+      if (complaint.user.role !== "CLIENT") return res.status(400).json({ error: "Only client transfer notices can be approved" });
+      if (String(complaint.subject || "").trim().toUpperCase() !== "TRANSFER NOTICE") {
+        return res.status(400).json({ error: "This complaint is not a transfer notice" });
+      }
+
+      const alreadyApproved = complaint.replies.some((r) => String(r.message || "").includes("__TRANSFER_APPROVED__:true"));
+      if (alreadyApproved) {
+        return res.status(409).json({ error: "Transfer notice already approved" });
+      }
+
+      const parsed = parseTransferNoticeMessage(complaint.message);
+      const isEmployerChange = String(parsed.transferType || "").toLowerCase().includes("employer");
+      const targetNewEmployeeNumber = String(parsed.newEmployeeNumber || "").trim() || complaint.user.employeeNumber;
+      const targetNewEmployer = String(parsed.newEmployerName || "").trim();
+      const normalizedEmployer = !targetNewEmployer || /^no\s+change$/i.test(targetNewEmployer) ? null : targetNewEmployer;
+      const targetNewBranch = String(parsed.newBranchName || "").trim() || null;
+
+      if (!targetNewEmployeeNumber) {
+        return res.status(400).json({ error: "Transfer notice missing new employee number" });
+      }
+      if (!targetNewBranch) {
+        return res.status(400).json({ error: "Transfer notice missing new branch" });
+      }
+      if (isEmployerChange && !normalizedEmployer) {
+        return res.status(400).json({ error: "Transfer notice missing new employer/bank for employer-change request" });
+      }
+
+      const noteParts = [];
+      if (parsed.workstation) noteParts.push(`Workstation: ${parsed.workstation}`);
+      if (parsed.reasonNote) noteParts.push(`Client Note: ${parsed.reasonNote}`);
+      noteParts.push(`Approved via complaint #${complaint.id}`);
+
+      const transferResult = await executeTransferForUser({
+        userId: complaint.user.id,
+        performedById: req.user.id,
+        newEmployeeNumber: targetNewEmployeeNumber,
+        newEmployerName: normalizedEmployer,
+        newBranchName: targetNewBranch,
+        note: noteParts.join(" | "),
+      });
+
+      const approvalReplyLines = [
+        "Transfer notice approved and processed.",
+        `Old Employee Number: ${parsed.oldEmployeeNumber || complaint.user.employeeNumber}`,
+        `New Employee Number: ${transferResult.updatedUser.employeeNumber}`,
+        `New Employer/Bank: ${normalizedEmployer || "No change"}`,
+        `New Branch: ${targetNewBranch}`,
+        "__TRANSFER_APPROVED__:true",
+      ];
+
+      const approvalReply = await prisma.complaintReply.create({
+        data: {
+          complaintId: complaint.id,
+          senderId: req.user.id,
+          message: approvalReplyLines.join("\n"),
+        },
+      });
+
+      await prisma.complaint.update({
+        where: { id: complaint.id },
+        data: {
+          status: "RESOLVED",
+          lastActivityAt: new Date(),
+          staffLastReadAt: new Date(),
+        },
+      });
+
+      return res.json({
+        message: "✅ Transfer notice approved and applied",
+        transfer: transferResult.history,
+        user: transferResult.updatedUser,
+        reply: approvalReply,
+      });
+    } catch (err) {
+      console.error("❌ approve transfer notice error:", err);
+
+      if (err.statusCode) {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
+
+      if (err.code === "P2002") {
+        return res.status(409).json({ error: "Unique constraint failed", details: err.meta });
+      }
+
+      return res.status(500).json({ error: "Failed to approve transfer notice", details: err.message });
     }
   }
 );
