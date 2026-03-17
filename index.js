@@ -3671,7 +3671,7 @@ app.post('/api/admin/users/:id/reset-password',
 
 // ——————————————————————————
 // DELETE /api/admin/users/:id
-// Delete a user by ID (supports cascade or soft delete)
+// Soft delete a user by ID and track in submissions
 app.delete('/api/admin/users/:id',
   authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
     const id = Number(req.params.id);
@@ -3690,33 +3690,30 @@ app.delete('/api/admin/users/:id',
         return res.status(404).json({ error: 'User not found' });
       }
 
-      // Optional soft delete: uncomment if using deletedAt
-      /*
+      const deletionTime = new Date();
+
+      // Soft delete user
       await prisma.user.update({
         where: { id },
-        data: { deletedAt: new Date() }
-      });
-      return res.json({ message: 'User soft-deleted successfully', id });
-      */
-
-      // Hard delete (with cascade on IdCards & Submissions if schema is updated)
-      await prisma.user.delete({
-        where: { id }
+        data: { deletedAt: deletionTime }
       });
 
-      console.log(`✅ User ${id} deleted. Cascade removed ${existing.idCards.length} idCards and ${existing.submissions.length} submissions.`);
+      // Mark user deletion time on all their submissions
+      await prisma.submission.updateMany({
+        where: { userId: id, userDeletedAt: null },
+        data: { userDeletedAt: deletionTime }
+      });
 
-      res.json({ message: 'User deleted successfully', id });
+      console.log(`✅ User ${id} soft-deleted. Marked ${existing.submissions.length} submissions with userDeletedAt.`);
+
+      res.json({ 
+        message: 'User soft-deleted successfully', 
+        id,
+        submissionsMarked: existing.submissions.length,
+        idCardsRetained: existing.idCards.length
+      });
     } catch (err) {
       console.error(`❌ DELETE /api/admin/users/${id} error:`, err);
-
-      // Detect FK error (for safety if cascade is missing)
-      if (err.code === 'P2003') {
-        return res.status(409).json({
-          error: 'Cannot delete user: dependent records exist. Enable cascade deletes or use soft delete.'
-        });
-      }
-
       res.status(500).json({ error: 'Failed to delete user', details: err.message });
     }
   });

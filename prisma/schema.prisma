@@ -70,6 +70,8 @@ model Submission {
   dues           String
   witness        String
   submittedAt    DateTime @default(now())
+  deletedAt      DateTime? // Soft delete for submissions
+  userDeletedAt  DateTime? // Tracks if associated user was deleted
 
   userId Int?
   user   User? @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -83,6 +85,8 @@ model Submission {
   @@index([branchName])
   @@index([phoneNumber])
   @@index([employeeName])
+  @@index([deletedAt])
+  @@index([userDeletedAt])
 }
 
 model IdCard {
