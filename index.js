@@ -3899,6 +3899,31 @@ app.delete('/submissions/:id', authenticate, async (req, res) => {
   }
 })
 
+// GET /submissions/archived/list -> fetch deleted/archived submissions (admin only)
+app.get('/submissions/archived/list', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  try {
+    const archived = await prisma.submission.findMany({
+      where: { deletedAt: { not: null } },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            username: true,
+            deletedAt: true
+          }
+        }
+      },
+      orderBy: { deletedAt: 'desc' }
+    })
+
+    res.json(archived)
+  } catch (err) {
+    console.error('❌ GET /submissions/archived/list error:', err)
+    res.status(500).json({ error: 'Failed to fetch archived submissions', details: err.message })
+  }
+})
+
 // (photos directory is now served above; cleaned images saved locally)
 
 /**
