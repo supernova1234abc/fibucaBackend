@@ -2,6 +2,9 @@
 const express = require('express')
 const nodemailer = require('nodemailer')
 const cors = require('cors')
+const helmet = require('helmet')
+const rateLimit = require('express-rate-limit')
+const slowDown = require('express-slow-down')
 const cookieParser = require('cookie-parser')
 const multer = require('multer')
 const fs = require('fs')
@@ -196,6 +199,57 @@ async function refreshLinkStatus(link) {
 
 const app = express()
 
+const MAX_JSON_BODY = process.env.MAX_JSON_BODY || '1mb';
+const MAX_URLENCODED_BODY = process.env.MAX_URLENCODED_BODY || '1mb';
+const LOGIN_MAX_ATTEMPTS = parseInt(process.env.LOGIN_MAX_ATTEMPTS || '5', 10);
+const LOGIN_LOCK_MS = parseInt(process.env.LOGIN_LOCK_MS || String(15 * 60 * 1000), 10);
+const loginAttemptStore = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of loginAttemptStore.entries()) {
+    if (!entry || !entry.lockUntil || entry.lockUntil < now) {
+      loginAttemptStore.delete(key);
+    }
+  }
+}, 10 * 60 * 1000);
+
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  })
+);
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again shortly.' },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many authentication attempts. Please try again later.' },
+});
+
+const loginSlowdown = slowDown({
+  windowMs: 15 * 60 * 1000,
+  delayAfter: 5,
+  delayMs: () => 400,
+  maxDelayMs: 5000,
+});
+
+app.use('/api', apiLimiter);
+app.use('/api/login', authLimiter, loginSlowdown);
+app.use('/api/auth/request-otp', authLimiter);
+app.use('/api/auth/verify-otp', authLimiter);
+app.use('/api/auth/reset-password-with-otp', authLimiter);
+
 // ---------- CORS & upload configuration ----------
 // Use environment variable CORS_ORIGIN when available; fall back to
 // legacy VITE_FRONTEND_URL and hard‑coded production domains.
@@ -222,7 +276,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Photo-Cleaned');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Photo-Cleaned,X-Requested-With');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -243,7 +297,7 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Photo-Cleaned"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Photo-Cleaned", "X-Requested-With"],
   })
 );
 
@@ -389,9 +443,34 @@ async function uploadComplaintPdf(req, file, complaintId) {
 
 
 // Parse JSON / URL-encoded requests
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
+app.use(express.json({ limit: MAX_JSON_BODY }))
+app.use(express.urlencoded({ extended: true, limit: MAX_URLENCODED_BODY }))
 app.use(cookieParser())
+
+function requireTrustedMutation(req, res, next) {
+  const method = String(req.method || '').toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return next();
+
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  const hasBearerToken = typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ');
+  const hasCookieToken = !!req.cookies?.fibuca_token;
+
+  if (!hasCookieToken || hasBearerToken) return next();
+
+  const origin = req.headers.origin;
+  if (origin && !allowedOrigins.includes(origin)) {
+    return res.status(403).json({ error: 'Blocked by origin policy' });
+  }
+
+  const requestedWith = req.headers['x-requested-with'];
+  if (requestedWith !== 'XMLHttpRequest') {
+    return res.status(403).json({ error: 'Missing trusted request header' });
+  }
+
+  return next();
+}
+
+app.use(requireTrustedMutation)
 
 // --------------------
 // Serve static files
@@ -2487,6 +2566,16 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ error: 'employeeNumber/username and password are required' })
     }
 
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+    const attemptKey = `${loginId.toLowerCase()}|${clientIp}`;
+    const now = Date.now();
+    const attemptInfo = loginAttemptStore.get(attemptKey);
+
+    if (attemptInfo?.lockUntil && attemptInfo.lockUntil > now) {
+      const remainingSec = Math.ceil((attemptInfo.lockUntil - now) / 1000);
+      return res.status(429).json({ error: `Account temporarily locked. Try again in ${remainingSec}s.` });
+    }
+
     const user = await prisma.user.findFirst({
       where: {
         OR: [
@@ -2495,10 +2584,22 @@ app.post('/api/login', async (req, res) => {
         ]
       }
     })
-    if (!user) return res.status(404).json({ error: 'User not found' })
+    if (!user) {
+      const fail = (attemptInfo?.count || 0) + 1;
+      const lockUntil = fail >= LOGIN_MAX_ATTEMPTS ? now + LOGIN_LOCK_MS : 0;
+      loginAttemptStore.set(attemptKey, { count: fail, lockUntil });
+      return res.status(404).json({ error: 'User not found' })
+    }
 
     const valid = await bcrypt.compare(password, user.password)
-    if (!valid) return res.status(401).json({ error: 'Incorrect password' })
+    if (!valid) {
+      const fail = (attemptInfo?.count || 0) + 1;
+      const lockUntil = fail >= LOGIN_MAX_ATTEMPTS ? now + LOGIN_LOCK_MS : 0;
+      loginAttemptStore.set(attemptKey, { count: fail, lockUntil });
+      return res.status(401).json({ error: 'Incorrect password' })
+    }
+
+    loginAttemptStore.delete(attemptKey)
 
     const token = jwt.sign(
       { id: user.id, employeeNumber: user.employeeNumber, role: user.role, firstLogin: user.firstLogin },
