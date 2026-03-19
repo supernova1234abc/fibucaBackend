@@ -204,6 +204,49 @@ const MAX_URLENCODED_BODY = process.env.MAX_URLENCODED_BODY || '1mb';
 const LOGIN_MAX_ATTEMPTS = parseInt(process.env.LOGIN_MAX_ATTEMPTS || '5', 10);
 const LOGIN_LOCK_MS = parseInt(process.env.LOGIN_LOCK_MS || String(15 * 60 * 1000), 10);
 const loginAttemptStore = new Map();
+const SECURITY_EVENT_LIMIT = parseInt(process.env.SECURITY_EVENT_LIMIT || '250', 10);
+const REQUEST_SNAPSHOT_LIMIT = parseInt(process.env.REQUEST_SNAPSHOT_LIMIT || '400', 10);
+const securityEventStore = [];
+const requestSnapshotStore = [];
+
+function getClientIp(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+}
+
+function recordSecurityEvent(type, req, details = {}) {
+  securityEventStore.unshift({
+    id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    type,
+    ip: getClientIp(req),
+    path: req.originalUrl || req.url || '',
+    method: req.method || 'UNKNOWN',
+    userId: req.user?.id || null,
+    role: req.user?.role || null,
+    userAgent: req.headers['user-agent'] || 'unknown',
+    createdAt: new Date().toISOString(),
+    details,
+  });
+
+  if (securityEventStore.length > SECURITY_EVENT_LIMIT) {
+    securityEventStore.length = SECURITY_EVENT_LIMIT;
+  }
+}
+
+function recordRequestSnapshot(req, statusCode, latencyMs) {
+  requestSnapshotStore.unshift({
+    id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    ip: getClientIp(req),
+    path: req.originalUrl || req.url || '',
+    method: req.method || 'UNKNOWN',
+    statusCode,
+    latencyMs,
+    createdAt: new Date().toISOString(),
+  });
+
+  if (requestSnapshotStore.length > REQUEST_SNAPSHOT_LIMIT) {
+    requestSnapshotStore.length = REQUEST_SNAPSHOT_LIMIT;
+  }
+}
 
 setInterval(() => {
   const now = Date.now();
@@ -226,7 +269,10 @@ const apiLimiter = rateLimit({
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many requests. Please try again shortly.' },
+  handler: (req, res) => {
+    recordSecurityEvent('api_rate_limited', req, { windowMs: 60 * 1000, max: 300 });
+    return res.status(429).json({ error: 'Too many requests. Please try again shortly.' });
+  },
 });
 
 const authLimiter = rateLimit({
@@ -234,7 +280,10 @@ const authLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many authentication attempts. Please try again later.' },
+  handler: (req, res) => {
+    recordSecurityEvent('auth_rate_limited', req, { windowMs: 15 * 60 * 1000, max: 30 });
+    return res.status(429).json({ error: 'Too many authentication attempts. Please try again later.' });
+  },
 });
 
 const loginSlowdown = slowDown({
@@ -459,11 +508,13 @@ function requireTrustedMutation(req, res, next) {
 
   const origin = req.headers.origin;
   if (origin && !allowedOrigins.includes(origin)) {
+    recordSecurityEvent('blocked_origin', req, { origin });
     return res.status(403).json({ error: 'Blocked by origin policy' });
   }
 
   const requestedWith = req.headers['x-requested-with'];
   if (requestedWith !== 'XMLHttpRequest') {
+    recordSecurityEvent('missing_trusted_header', req, { requestedWith: requestedWith || null });
     return res.status(403).json({ error: 'Missing trusted request header' });
   }
 
@@ -471,6 +522,15 @@ function requireTrustedMutation(req, res, next) {
 }
 
 app.use(requireTrustedMutation)
+
+app.use((req, res, next) => {
+  const started = Date.now();
+  res.on('finish', () => {
+    const latencyMs = Date.now() - started;
+    recordRequestSnapshot(req, res.statusCode, latencyMs);
+  });
+  next();
+});
 
 // --------------------
 // Serve static files
@@ -505,6 +565,7 @@ function authenticate(req, res, next) {
     next()
   } catch (err) {
     console.error('❌ Invalid JWT:', err)
+    recordSecurityEvent('invalid_jwt', req, { message: err.message });
     // If the token came from cookie, clear it. If it was a header, nothing to clear.
     if (req.cookies && req.cookies.fibuca_token) res.clearCookie('fibuca_token')
     return res.status(401).json({ message: 'Invalid or expired token' })
@@ -2573,6 +2634,7 @@ app.post('/api/login', async (req, res) => {
 
     if (attemptInfo?.lockUntil && attemptInfo.lockUntil > now) {
       const remainingSec = Math.ceil((attemptInfo.lockUntil - now) / 1000);
+      recordSecurityEvent('login_locked_attempt', req, { loginId, remainingSec });
       return res.status(429).json({ error: `Account temporarily locked. Try again in ${remainingSec}s.` });
     }
 
@@ -2588,6 +2650,7 @@ app.post('/api/login', async (req, res) => {
       const fail = (attemptInfo?.count || 0) + 1;
       const lockUntil = fail >= LOGIN_MAX_ATTEMPTS ? now + LOGIN_LOCK_MS : 0;
       loginAttemptStore.set(attemptKey, { count: fail, lockUntil });
+      recordSecurityEvent('login_user_not_found', req, { loginId, failures: fail, locked: !!lockUntil });
       return res.status(404).json({ error: 'User not found' })
     }
 
@@ -2596,10 +2659,17 @@ app.post('/api/login', async (req, res) => {
       const fail = (attemptInfo?.count || 0) + 1;
       const lockUntil = fail >= LOGIN_MAX_ATTEMPTS ? now + LOGIN_LOCK_MS : 0;
       loginAttemptStore.set(attemptKey, { count: fail, lockUntil });
+      recordSecurityEvent('login_invalid_password', req, {
+        loginId,
+        userId: user.id,
+        failures: fail,
+        locked: !!lockUntil,
+      });
       return res.status(401).json({ error: 'Incorrect password' })
     }
 
     loginAttemptStore.delete(attemptKey)
+    recordSecurityEvent('login_success', req, { userId: user.id, role: user.role });
 
     const token = jwt.sign(
       { id: user.id, employeeNumber: user.employeeNumber, role: user.role, firstLogin: user.firstLogin },
@@ -2647,6 +2717,163 @@ app.get('/api/me', authenticate, async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.user.id } })
   res.json({ user })
 })
+
+// SUPERADMIN: unified monitoring + control center data
+app.get('/api/superadmin/overview', authenticate, requireRole(['SUPERADMIN']), async (req, res) => {
+  try {
+    const now = Date.now();
+    const oneHourAgoIso = new Date(now - (60 * 60 * 1000)).toISOString();
+
+    const [
+      totalUsers,
+      activeUsers,
+      archivedUsers,
+      totalSubmissions,
+      archivedSubmissions,
+      totalComplaints,
+      openComplaints,
+      totalTransfers,
+      recentUsers,
+      recentComplaints,
+      recentTransfers,
+      roleBreakdown,
+    ] = await Promise.all([
+      prisma.user.count(),
+      prisma.user.count({ where: { deletedAt: null } }),
+      prisma.user.count({ where: { NOT: { deletedAt: null } } }),
+      prisma.submission.count(),
+      prisma.submission.count({ where: { NOT: { deletedAt: null } } }),
+      prisma.complaint.count(),
+      prisma.complaint.count({ where: { status: 'OPEN' } }),
+      prisma.transferHistory.count(),
+      prisma.user.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 8,
+        select: {
+          id: true,
+          name: true,
+          employeeNumber: true,
+          role: true,
+          createdAt: true,
+          deletedAt: true,
+        },
+      }),
+      prisma.complaint.findMany({
+        orderBy: { updatedAt: 'desc' },
+        take: 8,
+        select: {
+          id: true,
+          subject: true,
+          status: true,
+          updatedAt: true,
+          user: {
+            select: { id: true, name: true, employeeNumber: true },
+          },
+        },
+      }),
+      prisma.transferHistory.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 8,
+        select: {
+          id: true,
+          oldEmployerName: true,
+          newEmployerName: true,
+          oldEmployeeNumber: true,
+          newEmployeeNumber: true,
+          createdAt: true,
+          user: { select: { id: true, name: true } },
+          performedBy: { select: { id: true, name: true, role: true } },
+        },
+      }),
+      prisma.user.groupBy({
+        by: ['role'],
+        _count: { role: true },
+      }),
+    ]);
+
+    const lockouts = [];
+    for (const [key, info] of loginAttemptStore.entries()) {
+      if (info?.lockUntil && info.lockUntil > now) {
+        lockouts.push({
+          key,
+          count: info.count || 0,
+          lockUntil: new Date(info.lockUntil).toISOString(),
+          remainingSec: Math.ceil((info.lockUntil - now) / 1000),
+        });
+      }
+    }
+
+    const latestSecurityEvents = securityEventStore.slice(0, 25);
+    const latestRequests = requestSnapshotStore.slice(0, 60);
+    const suspiciousLastHour = securityEventStore.filter((event) => {
+      return event.createdAt >= oneHourAgoIso && event.type !== 'login_success';
+    }).length;
+
+    return res.json({
+      generatedAt: new Date().toISOString(),
+      metrics: {
+        users: {
+          total: totalUsers,
+          active: activeUsers,
+          archived: archivedUsers,
+          byRole: roleBreakdown.reduce((acc, row) => {
+            acc[row.role] = row._count.role;
+            return acc;
+          }, {}),
+        },
+        submissions: {
+          total: totalSubmissions,
+          archived: archivedSubmissions,
+        },
+        complaints: {
+          total: totalComplaints,
+          open: openComplaints,
+        },
+        transfers: {
+          total: totalTransfers,
+        },
+        security: {
+          activeLockouts: lockouts.length,
+          suspiciousEventsLastHour: suspiciousLastHour,
+          trackedEvents: securityEventStore.length,
+          trackedRequests: requestSnapshotStore.length,
+        },
+      },
+      lockouts,
+      securityEvents: latestSecurityEvents,
+      recentRequests: latestRequests,
+      recentUsers,
+      recentComplaints,
+      recentTransfers,
+    });
+  } catch (err) {
+    console.error('❌ GET /api/superadmin/overview error:', err);
+    return res.status(500).json({ error: 'Failed to load superadmin overview', details: err.message });
+  }
+});
+
+// SUPERADMIN: reset in-memory security state (lockouts + telemetry buffers)
+app.post('/api/superadmin/security/reset-state', authenticate, requireRole(['SUPERADMIN']), async (req, res) => {
+  try {
+    loginAttemptStore.clear();
+    securityEventStore.length = 0;
+    requestSnapshotStore.length = 0;
+
+    recordSecurityEvent('security_state_reset', req, { byUserId: req.user.id });
+
+    return res.json({
+      message: '✅ Superadmin security state reset completed',
+      reset: {
+        loginLockoutsCleared: true,
+        securityEventsCleared: true,
+        requestSnapshotsCleared: true,
+      },
+    });
+  } catch (err) {
+    console.error('❌ POST /api/superadmin/security/reset-state error:', err);
+    return res.status(500).json({ error: 'Failed to reset security state', details: err.message });
+  }
+});
 
 // PUT /api/profile — update own email / phone / phone2 (cannot delete existing phone)
 app.put('/api/profile', authenticate, async (req, res) => {
