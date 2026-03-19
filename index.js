@@ -206,8 +206,23 @@ const LOGIN_LOCK_MS = parseInt(process.env.LOGIN_LOCK_MS || String(15 * 60 * 100
 const loginAttemptStore = new Map();
 const SECURITY_EVENT_LIMIT = parseInt(process.env.SECURITY_EVENT_LIMIT || '250', 10);
 const REQUEST_SNAPSHOT_LIMIT = parseInt(process.env.REQUEST_SNAPSHOT_LIMIT || '400', 10);
+const ACTIVE_SESSION_TIMEOUT_MS = parseInt(process.env.ACTIVE_SESSION_TIMEOUT_MS || String(2 * 60 * 60 * 1000), 10);
 const securityEventStore = [];
 const requestSnapshotStore = [];
+const activeSessionStore = new Map(); // userId (string) → session record
+
+function recordActiveSession(req) {
+  if (!req.user?.id) return;
+  activeSessionStore.set(String(req.user.id), {
+    userId: req.user.id,
+    employeeNumber: req.user.employeeNumber || null,
+    role: req.user.role || 'UNKNOWN',
+    ip: getClientIp(req),
+    userAgent: req.headers['user-agent'] || 'unknown',
+    lastSeen: new Date().toISOString(),
+    lastSeenMs: Date.now(),
+  });
+}
 
 function getClientIp(req) {
   return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
@@ -253,6 +268,11 @@ setInterval(() => {
   for (const [key, entry] of loginAttemptStore.entries()) {
     if (!entry || !entry.lockUntil || entry.lockUntil < now) {
       loginAttemptStore.delete(key);
+    }
+  }
+  for (const [userId, session] of activeSessionStore.entries()) {
+    if (!session || now - session.lastSeenMs > ACTIVE_SESSION_TIMEOUT_MS) {
+      activeSessionStore.delete(userId);
     }
   }
 }, 10 * 60 * 1000);
@@ -562,6 +582,7 @@ function authenticate(req, res, next) {
   try {
     const payload = jwt.verify(token, JWT_SECRET)
     req.user = payload
+    recordActiveSession(req);
     next()
   } catch (err) {
     console.error('❌ Invalid JWT:', err)
@@ -2809,6 +2830,38 @@ app.get('/api/superadmin/overview', authenticate, requireRole(['SUPERADMIN']), a
       return event.createdAt >= oneHourAgoIso && event.type !== 'login_success';
     }).length;
 
+    // Active sessions — who is currently logged in
+    const ONLINE_THRESH = 5 * 60 * 1000;
+    const IDLE_THRESH = 60 * 60 * 1000;
+    const sessionEntries = [...activeSessionStore.values()].filter(
+      (s) => s && (now - s.lastSeenMs) < ACTIVE_SESSION_TIMEOUT_MS
+    );
+    let activeSessions = [];
+    if (sessionEntries.length > 0) {
+      const userIds = sessionEntries.map((s) => s.userId);
+      const dbUsers = await prisma.user.findMany({
+        where: { id: { in: userIds } },
+        select: { id: true, name: true, employeeNumber: true, role: true },
+      });
+      const userMap = new Map(dbUsers.map((u) => [u.id, u]));
+      activeSessions = sessionEntries.map((s) => {
+        const dbUser = userMap.get(s.userId) || {};
+        const idleMs = now - s.lastSeenMs;
+        const status = idleMs < ONLINE_THRESH ? 'online' : idleMs < IDLE_THRESH ? 'idle' : 'away';
+        return {
+          userId: s.userId,
+          name: dbUser.name || s.employeeNumber || String(s.userId),
+          employeeNumber: dbUser.employeeNumber || s.employeeNumber,
+          role: dbUser.role || s.role,
+          ip: s.ip,
+          userAgent: s.userAgent,
+          lastSeen: s.lastSeen,
+          lastSeenMs: s.lastSeenMs,
+          status,
+        };
+      }).sort((a, b) => b.lastSeenMs - a.lastSeenMs);
+    }
+
     return res.json({
       generatedAt: new Date().toISOString(),
       metrics: {
@@ -2839,6 +2892,7 @@ app.get('/api/superadmin/overview', authenticate, requireRole(['SUPERADMIN']), a
           trackedRequests: requestSnapshotStore.length,
         },
       },
+      activeSessions,
       lockouts,
       securityEvents: latestSecurityEvents,
       recentRequests: latestRequests,
