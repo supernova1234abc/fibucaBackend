@@ -603,6 +603,32 @@ function requireRole(roles = []) {
   };
 }
 
+function canManageTargetUser(actor, target, options = {}) {
+  const { allowSelf = false } = options;
+  if (!actor || !target) return false;
+  if (!allowSelf && actor.id === target.id) return false;
+  if (actor.role === 'SUPERADMIN') return true;
+  if (actor.role === 'ADMIN' && target.role === 'SUPERADMIN') return false;
+  return actor.role === 'ADMIN';
+}
+
+async function getManageableUserOrReject(req, res, id, options = {}) {
+  const target = await prisma.user.findUnique({ where: { id } });
+  if (!target) {
+    res.status(404).json({ error: 'User not found' });
+    return null;
+  }
+  if (!canManageTargetUser(req.user, target, options)) {
+    res.status(403).json({
+      error: req.user?.role === 'ADMIN'
+        ? 'Admin cannot manage superadmin users'
+        : 'You are not allowed to manage this user',
+    });
+    return null;
+  }
+  return target;
+}
+
 
 function normalizeSpaces(value = "") {
   return String(value).replace(/\s+/g, " ").trim();
@@ -2754,6 +2780,7 @@ app.get('/api/superadmin/overview', authenticate, requireRole(['SUPERADMIN']), a
       totalComplaints,
       openComplaints,
       totalTransfers,
+      allUsers,
       recentUsers,
       recentComplaints,
       recentTransfers,
@@ -2767,6 +2794,22 @@ app.get('/api/superadmin/overview', authenticate, requireRole(['SUPERADMIN']), a
       prisma.complaint.count(),
       prisma.complaint.count({ where: { status: 'OPEN' } }),
       prisma.transferHistory.count(),
+      prisma.user.findMany({
+        select: {
+          id: true,
+          name: true,
+          username: true,
+          email: true,
+          employeeNumber: true,
+          role: true,
+          createdAt: true,
+          deletedAt: true,
+        },
+        orderBy: [
+          { deletedAt: 'asc' },
+          { createdAt: 'desc' },
+        ],
+      }),
       prisma.user.findMany({
         orderBy: { createdAt: 'desc' },
         take: 8,
@@ -2892,6 +2935,7 @@ app.get('/api/superadmin/overview', authenticate, requireRole(['SUPERADMIN']), a
           trackedRequests: requestSnapshotStore.length,
         },
       },
+      allUsers,
       activeSessions,
       lockouts,
       securityEvents: latestSecurityEvents,
@@ -3979,6 +4023,10 @@ app.post('/api/admin/users',
     }
 
     try {
+      if (req.user.role === 'ADMIN' && role === 'SUPERADMIN') {
+        return res.status(403).json({ error: 'Admin cannot create superadmin users' })
+      }
+
       // ensure username & employeeNumber are unique
       const conflict = await prisma.user.findFirst({
         where: {
@@ -4039,11 +4087,11 @@ app.put('/api/admin/users/:id',
     const { name, email, role, employeeNumber } = req.body
 
     try {
-      const existing = await prisma.user.findUnique({
-        where: { id: Number(id) }
-      })
-      if (!existing) {
-        return res.status(404).json({ error: 'User not found' })
+      const existing = await getManageableUserOrReject(req, res, Number(id))
+      if (!existing) return
+
+      if (req.user.role === 'ADMIN' && role === 'SUPERADMIN') {
+        return res.status(403).json({ error: 'Admin cannot assign superadmin role' })
       }
 
       // if employeeNumber changed, check uniqueness
@@ -4100,10 +4148,8 @@ app.post('/api/admin/users/:id/reset-first-login-otp',
         return res.status(400).json({ error: 'Unsupported OTP channel' });
       }
 
-      const user = await prisma.user.findUnique({ where: { id } });
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
+      const user = await getManageableUserOrReject(req, res, id);
+      if (!user) return;
 
       let target = '';
       if (channel === OTP_CHANNEL.EMAIL) {
@@ -4177,8 +4223,8 @@ app.post('/api/admin/users/:id/reset-password',
 
     try {
       const hash = await bcrypt.hash(String(newPassword), 10);
-      const user = await prisma.user.findUnique({ where: { id } });
-      if (!user) return res.status(404).json({ error: 'User not found' });
+      const user = await getManageableUserOrReject(req, res, id);
+      if (!user) return;
 
       await prisma.user.update({
         where: { id },
@@ -4224,6 +4270,9 @@ app.delete('/api/admin/users/:id',
     if (isNaN(id)) return res.status(400).json({ error: 'Invalid user ID' });
 
     try {
+      const basicTarget = await getManageableUserOrReject(req, res, id)
+      if (!basicTarget) return
+
       const existing = await prisma.user.findUnique({
         where: { id },
         include: {
@@ -4231,10 +4280,6 @@ app.delete('/api/admin/users/:id',
           submissions: true
         }
       });
-
-      if (!existing) {
-        return res.status(404).json({ error: 'User not found' });
-      }
 
       const deletionTime = new Date();
 
@@ -4548,9 +4593,8 @@ app.patch('/api/admin/users/:id/restore', authenticate, requireRole(['ADMIN', 'S
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid user ID' })
 
   try {
-    const existing = await prisma.user.findUnique({ where: { id } })
-
-    if (!existing) return res.status(404).json({ error: 'User not found' })
+    const existing = await getManageableUserOrReject(req, res, id)
+    if (!existing) return
     if (!existing.deletedAt) return res.status(409).json({ error: 'User is not archived' })
 
     await prisma.user.update({
@@ -4571,9 +4615,8 @@ app.delete('/api/admin/users/:id/permanent', authenticate, requireRole(['ADMIN',
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid user ID' })
 
   try {
-    const existing = await prisma.user.findUnique({ where: { id } })
-
-    if (!existing) return res.status(404).json({ error: 'User not found' })
+    const existing = await getManageableUserOrReject(req, res, id)
+    if (!existing) return
     if (!existing.deletedAt) return res.status(409).json({ error: 'Only archived users can be permanently deleted' })
 
     await prisma.user.delete({ where: { id } })
