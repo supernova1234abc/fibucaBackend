@@ -247,6 +247,19 @@ function recordSecurityEvent(type, req, details = {}) {
   }
 }
 
+function recordUserManagementEvent(type, req, targetUser, details = {}) {
+  recordSecurityEvent(type, req, {
+    actorId: req.user?.id || null,
+    actorRole: req.user?.role || null,
+    targetUserId: targetUser?.id || null,
+    targetName: targetUser?.name || null,
+    targetUsername: targetUser?.username || null,
+    targetEmployeeNumber: targetUser?.employeeNumber || null,
+    targetRole: targetUser?.role || null,
+    ...details,
+  });
+}
+
 function recordRequestSnapshot(req, statusCode, latencyMs) {
   requestSnapshotStore.unshift({
     id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
@@ -2869,6 +2882,9 @@ app.get('/api/superadmin/overview', authenticate, requireRole(['SUPERADMIN']), a
 
     const latestSecurityEvents = securityEventStore.slice(0, 25);
     const latestRequests = requestSnapshotStore.slice(0, 60);
+    const userAuditEvents = securityEventStore
+      .filter((event) => event.type.startsWith('user_'))
+      .slice(0, 40);
     const suspiciousLastHour = securityEventStore.filter((event) => {
       return event.createdAt >= oneHourAgoIso && event.type !== 'login_success';
     }).length;
@@ -2937,6 +2953,7 @@ app.get('/api/superadmin/overview', authenticate, requireRole(['SUPERADMIN']), a
       },
       allUsers,
       activeSessions,
+      userAuditEvents,
       lockouts,
       securityEvents: latestSecurityEvents,
       recentRequests: latestRequests,
@@ -4071,6 +4088,10 @@ app.post('/api/admin/users',
         console.warn('⚠️ sendWelcomeCredentials (admin create user) failed:', e.message)
       );
 
+      recordUserManagementEvent('user_created', req, user, {
+        createdRole: user.role,
+      });
+
       res.status(201).json(user)
     } catch (err) {
       console.error('❌ POST /api/admin/users error:', err)
@@ -4125,6 +4146,11 @@ app.put('/api/admin/users/:id',
           createdAt: true
         }
       })
+
+      recordUserManagementEvent('user_updated', req, updated, {
+        previousRole: existing.role,
+        previousEmployeeNumber: existing.employeeNumber,
+      });
 
       res.json(updated)
     } catch (err) {
@@ -4202,6 +4228,10 @@ app.post('/api/admin/users/:id/reset-first-login-otp',
 
       if (shouldExposeOtpCode(delivery?.deliveryMode)) payload.devOtp = otpCode;
 
+      recordUserManagementEvent('user_first_login_otp_reset', req, user, {
+        channel,
+      });
+
       return res.json(payload);
     } catch (err) {
       console.error('❌ POST /api/admin/users/:id/reset-first-login-otp error:', err);
@@ -4254,6 +4284,8 @@ app.post('/api/admin/users/:id/reset-password',
         phone: latestSub?.phoneNumber || '',
       }).catch((e) => console.warn('⚠️ sendWelcomeCredentials (reset-password) failed:', e.message));
 
+      recordUserManagementEvent('user_password_reset', req, user);
+
       return res.json({ message: 'Password reset successfully. Credentials sent to user.' });
     } catch (err) {
       console.error(`❌ POST /api/admin/users/${id}/reset-password error:`, err);
@@ -4296,6 +4328,11 @@ app.delete('/api/admin/users/:id',
       });
 
       console.log(`✅ User ${id} soft-deleted. Marked ${existing.submissions.length} submissions with userDeletedAt.`);
+
+      recordUserManagementEvent('user_soft_deleted', req, existing, {
+        submissionsMarked: existing.submissions.length,
+        idCardsRetained: existing.idCards.length,
+      });
 
       res.json({ 
         message: 'User soft-deleted successfully', 
@@ -4602,6 +4639,8 @@ app.patch('/api/admin/users/:id/restore', authenticate, requireRole(['ADMIN', 'S
       data: { deletedAt: null }
     })
 
+    recordUserManagementEvent('user_restored', req, existing)
+
     res.json({ message: 'User restored successfully', id })
   } catch (err) {
     console.error(`❌ PATCH /api/admin/users/${id}/restore error:`, err)
@@ -4618,6 +4657,8 @@ app.delete('/api/admin/users/:id/permanent', authenticate, requireRole(['ADMIN',
     const existing = await getManageableUserOrReject(req, res, id)
     if (!existing) return
     if (!existing.deletedAt) return res.status(409).json({ error: 'Only archived users can be permanently deleted' })
+
+    recordUserManagementEvent('user_permanently_deleted', req, existing)
 
     await prisma.user.delete({ where: { id } })
 
