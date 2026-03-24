@@ -4854,9 +4854,207 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// VOTING SYSTEM — Blockchain-secured staff voting
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VOTE_SECRET = process.env.VOTE_SECRET || 'fibuca-vote-secret-2026';
+const voteSha256 = (str) => require('crypto').createHash('sha256').update(str).digest('hex');
+const voteVoterHash = (userId, sessionId) => voteSha256(`${userId}:${sessionId}:${VOTE_SECRET}`);
+
+// ── Admin: Create a voting session ──────────────────────────────────────────
+app.post('/api/admin/voting/sessions', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const { title, description, candidates } = req.body;
+  if (!title || !Array.isArray(candidates) || candidates.length < 2) {
+    return res.status(400).json({ error: 'title and at least 2 candidates required' });
+  }
+  for (const c of candidates) {
+    if (!c.id || !c.name) return res.status(400).json({ error: 'Each candidate needs id and name' });
+  }
+  const genesisHash = voteSha256(JSON.stringify({ title, candidates, createdBy: req.user.id, ts: Date.now() }));
+  const session = await prisma.votingSession.create({
+    data: { title, description: description || null, candidates, status: 'PENDING', genesisHash, createdById: req.user.id },
+    include: { createdBy: { select: { id: true, name: true, role: true } } },
+  });
+  res.json({ session });
+});
+
+// ── Admin: List all sessions ─────────────────────────────────────────────────
+app.get('/api/admin/voting/sessions', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const sessions = await prisma.votingSession.findMany({
+    orderBy: { createdAt: 'desc' },
+    include: {
+      createdBy: { select: { id: true, name: true, role: true } },
+      _count: { select: { votes: true } },
+    },
+  });
+  res.json({ sessions });
+});
+
+// ── Admin: Start a session (PENDING → ACTIVE) ────────────────────────────────
+app.post('/api/admin/voting/sessions/:id/start', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const id = parseInt(req.params.id);
+  const session = await prisma.votingSession.findUnique({ where: { id } });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (session.status !== 'PENDING') return res.status(400).json({ error: `Session is already ${session.status}` });
+  const updated = await prisma.votingSession.update({
+    where: { id },
+    data: { status: 'ACTIVE', activatedAt: new Date() },
+  });
+  res.json({ session: updated });
+});
+
+// ── Admin: End a session (ACTIVE → ENDED) ────────────────────────────────────
+app.post('/api/admin/voting/sessions/:id/end', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const id = parseInt(req.params.id);
+  const session = await prisma.votingSession.findUnique({ where: { id } });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (session.status !== 'ACTIVE') return res.status(400).json({ error: `Session is not ACTIVE (current: ${session.status})` });
+  const updated = await prisma.votingSession.update({
+    where: { id },
+    data: { status: 'ENDED', endedAt: new Date() },
+  });
+  res.json({ session: updated });
+});
+
+// ── Admin: Session results + chain verification ──────────────────────────────
+app.get('/api/admin/voting/sessions/:id/results', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const id = parseInt(req.params.id);
+  const session = await prisma.votingSession.findUnique({
+    where: { id },
+    include: {
+      votes: { orderBy: { blockIndex: 'asc' } },
+      createdBy: { select: { id: true, name: true, role: true } },
+    },
+  });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  // Verify chain integrity
+  let chainValid = true;
+  let prevHash = session.genesisHash;
+  for (const vote of session.votes) {
+    const expectedHash = voteSha256(`${prevHash}|${vote.voterHash}|${vote.candidateId}|${vote.createdAt.toISOString()}`);
+    if (expectedHash !== vote.blockHash || vote.prevHash !== prevHash) {
+      chainValid = false;
+      break;
+    }
+    prevHash = vote.blockHash;
+  }
+
+  const tally = {};
+  const candidates = Array.isArray(session.candidates) ? session.candidates : [];
+  for (const c of candidates) tally[c.id] = { candidate: c, count: 0 };
+  for (const vote of session.votes) {
+    if (tally[vote.candidateId]) tally[vote.candidateId].count++;
+  }
+
+  res.json({
+    session: { ...session, votes: undefined },
+    totalVotes: session._count ? session._count.votes : session.votes.length,
+    chainValid,
+    tally: Object.values(tally).sort((a, b) => b.count - a.count),
+    blocks: session.votes.map((v) => ({
+      blockIndex: v.blockIndex,
+      blockHash: v.blockHash,
+      prevHash: v.prevHash,
+      candidateId: v.candidateId,
+      createdAt: v.createdAt,
+    })),
+  });
+});
+
+// ── Staff: List accessible sessions ─────────────────────────────────────────
+app.get('/api/voting/sessions', authenticate, async (req, res) => {
+  const sessions = await prisma.votingSession.findMany({
+    where: { status: { in: ['ACTIVE', 'ENDED'] } },
+    orderBy: { createdAt: 'desc' },
+    include: {
+      createdBy: { select: { id: true, name: true } },
+      _count: { select: { votes: true } },
+    },
+  });
+
+  const myVotes = sessions.length > 0
+    ? await prisma.voteRecord.findMany({
+        where: { OR: sessions.map((s) => ({ sessionId: s.id, voterHash: voteVoterHash(req.user.id, s.id) })) },
+        select: { sessionId: true },
+      })
+    : [];
+  const votedSet = new Set(myVotes.map((v) => v.sessionId));
+
+  res.json({ sessions: sessions.map((s) => ({ ...s, hasVoted: votedSet.has(s.id) })) });
+});
+
+// ── Staff: Get single session detail ─────────────────────────────────────────
+app.get('/api/voting/sessions/:id', authenticate, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const session = await prisma.votingSession.findUnique({
+    where: { id },
+    include: { createdBy: { select: { id: true, name: true } }, _count: { select: { votes: true } } },
+  });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (session.status === 'PENDING') return res.status(403).json({ error: 'Session not started yet' });
+
+  const vh = voteVoterHash(req.user.id, id);
+  const myVote = await prisma.voteRecord.findUnique({ where: { sessionId_voterHash: { sessionId: id, voterHash: vh } } });
+
+  let tally = null;
+  if (session.status === 'ENDED') {
+    const votes = await prisma.voteRecord.findMany({ where: { sessionId: id } });
+    const map = {};
+    for (const c of (Array.isArray(session.candidates) ? session.candidates : [])) map[c.id] = { candidate: c, count: 0 };
+    for (const v of votes) { if (map[v.candidateId]) map[v.candidateId].count++; }
+    tally = Object.values(map).sort((a, b) => b.count - a.count);
+  }
+
+  res.json({ session, hasVoted: !!myVote, receiptHash: myVote ? myVote.blockHash : null, tally });
+});
+
+// ── Staff: Cast a vote ────────────────────────────────────────────────────────
+app.post('/api/voting/sessions/:id/vote', authenticate, requireRole(['STAFF']), async (req, res) => {
+  const id = parseInt(req.params.id);
+  const { candidateId } = req.body;
+  if (!candidateId) return res.status(400).json({ error: 'candidateId required' });
+
+  const session = await prisma.votingSession.findUnique({
+    where: { id },
+    include: { votes: { orderBy: { blockIndex: 'desc' }, take: 1 } },
+  });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (session.status !== 'ACTIVE') return res.status(400).json({ error: 'Voting is not open for this session' });
+
+  const candidates = Array.isArray(session.candidates) ? session.candidates : [];
+  if (!candidates.find((c) => c.id === candidateId)) return res.status(400).json({ error: 'Invalid candidateId' });
+
+  const vh = voteVoterHash(req.user.id, id);
+  const prevHash = session.votes.length > 0 ? session.votes[0].blockHash : session.genesisHash;
+  const blockIndex = session.votes.length > 0 ? session.votes[0].blockIndex + 1 : 0;
+  const now = new Date();
+  const blockHash = voteSha256(`${prevHash}|${vh}|${candidateId}|${now.toISOString()}`);
+
+  try {
+    const vote = await prisma.voteRecord.create({
+      data: { sessionId: id, voterHash: vh, candidateId, blockIndex, prevHash, blockHash, createdAt: now },
+    });
+    res.json({ success: true, blockHash: vote.blockHash, blockIndex: vote.blockIndex });
+  } catch (err) {
+    if (err.code === 'P2002') return res.status(409).json({ error: 'You have already voted in this session' });
+    throw err;
+  }
+});
+
+// ── Admin: Delete a PENDING session ─────────────────────────────────────────
+app.delete('/api/admin/voting/sessions/:id', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const id = parseInt(req.params.id);
+  const session = await prisma.votingSession.findUnique({ where: { id } });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (session.status !== 'PENDING') return res.status(400).json({ error: 'Can only delete PENDING sessions' });
+  await prisma.votingSession.delete({ where: { id } });
+  res.json({ success: true });
+});
+
 // global error handler (must come after all route definitions)
 app.use((err, req, res, next) => {
-  if (!err) return next();
   // multer file size limit error
   if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
     console.warn('⚠️ upload rejected - file too large:', err.message);

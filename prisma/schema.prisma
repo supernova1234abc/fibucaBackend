@@ -39,7 +39,9 @@ model User {
   transfersMade    TransferHistory[] @relation("TransferBy")
   publishedDocuments OfficialDocument[]
   publishedUpdates   OfficialUpdate[]
+  votingSessions VotingSession[] @relation("VotingCreatedBy")
 }
+
 
 model StaffLink {
   id    Int    @id @default(autoincrement())
@@ -226,4 +228,39 @@ model UserAuditLog {
   @@index([actorId])
   @@index([targetUserId])
   @@index([createdAt])
+}
+
+model VotingSession {
+  id          Int       @id @default(autoincrement())
+  title       String
+  description String?
+  candidates  Json      // [{id: string, name: string, description?: string}]
+  status      String    @default("PENDING") // PENDING | ACTIVE | ENDED
+  genesisHash String
+  createdById Int
+  createdBy   User      @relation("VotingCreatedBy", fields: [createdById], references: [id])
+  activatedAt DateTime?
+  endedAt     DateTime?
+  createdAt   DateTime  @default(now())
+  votes       VoteRecord[]
+
+  @@index([status])
+  @@index([createdById])
+}
+
+model VoteRecord {
+  id          Int      @id @default(autoincrement())
+  sessionId   Int
+  voterHash   String   // SHA256(userId:sessionId:VOTE_SECRET) — anonymous, verifiable
+  candidateId String
+  blockIndex  Int
+  prevHash    String
+  blockHash   String   // SHA256(prevHash|voterHash|candidateId|createdAt.ISO)
+  createdAt   DateTime @default(now())
+
+  session VotingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, voterHash])
+  @@index([sessionId])
+  @@index([blockIndex])
 }
