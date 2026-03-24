@@ -247,9 +247,10 @@ function recordSecurityEvent(type, req, details = {}) {
   }
 }
 
-function recordUserManagementEvent(type, req, targetUser, details = {}) {
+async function recordUserManagementEvent(type, req, targetUser, details = {}) {
   recordSecurityEvent(type, req, {
     actorId: req.user?.id || null,
+    actorName: req.user?.name || null,
     actorRole: req.user?.role || null,
     targetUserId: targetUser?.id || null,
     targetName: targetUser?.name || null,
@@ -258,6 +259,26 @@ function recordUserManagementEvent(type, req, targetUser, details = {}) {
     targetRole: targetUser?.role || null,
     ...details,
   });
+  // Persist to database
+  try {
+    await prisma.userAuditLog.create({
+      data: {
+        type,
+        actorId: req.user?.id || null,
+        actorName: req.user?.name || null,
+        actorRole: req.user?.role || null,
+        targetUserId: targetUser?.id || null,
+        targetName: targetUser?.name || null,
+        targetUsername: targetUser?.username || null,
+        targetEmployeeNumber: targetUser?.employeeNumber || null,
+        targetRole: targetUser?.role || null,
+        details: details || {},
+        ip: getClientIp(req),
+      },
+    });
+  } catch (e) {
+    console.error('❌ Failed to persist user audit log:', e.message);
+  }
 }
 
 function recordRequestSnapshot(req, statusCode, latencyMs) {
@@ -2732,7 +2753,7 @@ app.post('/api/login', async (req, res) => {
     recordSecurityEvent('login_success', req, { userId: user.id, role: user.role });
 
     const token = jwt.sign(
-      { id: user.id, employeeNumber: user.employeeNumber, role: user.role, firstLogin: user.firstLogin },
+      { id: user.id, employeeNumber: user.employeeNumber, name: user.name, role: user.role, firstLogin: user.firstLogin },
       JWT_SECRET,
       { expiresIn: '2h' }
     )
@@ -2882,9 +2903,10 @@ app.get('/api/superadmin/overview', authenticate, requireRole(['SUPERADMIN']), a
 
     const latestSecurityEvents = securityEventStore.slice(0, 25);
     const latestRequests = requestSnapshotStore.slice(0, 60);
-    const userAuditEvents = securityEventStore
-      .filter((event) => event.type.startsWith('user_'))
-      .slice(0, 40);
+    const userAuditEvents = await prisma.userAuditLog.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 40,
+    });
     const suspiciousLastHour = securityEventStore.filter((event) => {
       return event.createdAt >= oneHourAgoIso && event.type !== 'login_success';
     }).length;
@@ -4088,7 +4110,7 @@ app.post('/api/admin/users',
         console.warn('⚠️ sendWelcomeCredentials (admin create user) failed:', e.message)
       );
 
-      recordUserManagementEvent('user_created', req, user, {
+      await recordUserManagementEvent('user_created', req, user, {
         createdRole: user.role,
       });
 
@@ -4147,7 +4169,7 @@ app.put('/api/admin/users/:id',
         }
       })
 
-      recordUserManagementEvent('user_updated', req, updated, {
+      await recordUserManagementEvent('user_updated', req, updated, {
         previousRole: existing.role,
         previousEmployeeNumber: existing.employeeNumber,
       });
@@ -4228,7 +4250,7 @@ app.post('/api/admin/users/:id/reset-first-login-otp',
 
       if (shouldExposeOtpCode(delivery?.deliveryMode)) payload.devOtp = otpCode;
 
-      recordUserManagementEvent('user_first_login_otp_reset', req, user, {
+      await recordUserManagementEvent('user_first_login_otp_reset', req, user, {
         channel,
       });
 
@@ -4284,7 +4306,7 @@ app.post('/api/admin/users/:id/reset-password',
         phone: latestSub?.phoneNumber || '',
       }).catch((e) => console.warn('⚠️ sendWelcomeCredentials (reset-password) failed:', e.message));
 
-      recordUserManagementEvent('user_password_reset', req, user);
+      await recordUserManagementEvent('user_password_reset', req, user);
 
       return res.json({ message: 'Password reset successfully. Credentials sent to user.' });
     } catch (err) {
@@ -4329,7 +4351,7 @@ app.delete('/api/admin/users/:id',
 
       console.log(`✅ User ${id} soft-deleted. Marked ${existing.submissions.length} submissions with userDeletedAt.`);
 
-      recordUserManagementEvent('user_soft_deleted', req, existing, {
+      await recordUserManagementEvent('user_soft_deleted', req, existing, {
         submissionsMarked: existing.submissions.length,
         idCardsRetained: existing.idCards.length,
       });
@@ -4639,7 +4661,7 @@ app.patch('/api/admin/users/:id/restore', authenticate, requireRole(['ADMIN', 'S
       data: { deletedAt: null }
     })
 
-    recordUserManagementEvent('user_restored', req, existing)
+    await recordUserManagementEvent('user_restored', req, existing)
 
     res.json({ message: 'User restored successfully', id })
   } catch (err) {
@@ -4658,7 +4680,7 @@ app.delete('/api/admin/users/:id/permanent', authenticate, requireRole(['ADMIN',
     if (!existing) return
     if (!existing.deletedAt) return res.status(409).json({ error: 'Only archived users can be permanently deleted' })
 
-    recordUserManagementEvent('user_permanently_deleted', req, existing)
+    await recordUserManagementEvent('user_permanently_deleted', req, existing)
 
     await prisma.user.delete({ where: { id } })
 
@@ -4667,6 +4689,54 @@ app.delete('/api/admin/users/:id/permanent', authenticate, requireRole(['ADMIN',
     console.error(`❌ DELETE /api/admin/users/${id}/permanent error:`, err)
     res.status(500).json({ error: 'Failed to permanently delete user', details: err.message })
   }
+})
+
+// POST /api/admin/users/bulk -> bulk operations on multiple users
+app.post('/api/admin/users/bulk', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  const { action, userIds } = req.body;
+
+  if (!action || !Array.isArray(userIds) || userIds.length === 0) {
+    return res.status(400).json({ error: 'action and userIds[] are required' });
+  }
+
+  const validActions = ['delete', 'restore', 'permanent_delete'];
+  if (!validActions.includes(action)) {
+    return res.status(400).json({ error: 'Invalid action. Use: delete, restore, or permanent_delete' });
+  }
+
+  const ids = userIds.map(Number).filter((n) => !isNaN(n));
+  if (ids.length === 0) return res.status(400).json({ error: 'No valid user IDs provided' });
+
+  const results = { success: [], failed: [] };
+
+  for (const id of ids) {
+    try {
+      const target = await prisma.user.findUnique({ where: { id } });
+      if (!target) { results.failed.push({ id, reason: 'Not found' }); continue; }
+      if (!canManageTargetUser(req.user, target)) { results.failed.push({ id, reason: 'Permission denied' }); continue; }
+
+      if (action === 'delete') {
+        if (target.deletedAt) { results.failed.push({ id, reason: 'Already archived' }); continue; }
+        await prisma.user.update({ where: { id }, data: { deletedAt: new Date() } });
+        await recordUserManagementEvent('user_soft_deleted', req, target, { bulk: true });
+        results.success.push(id);
+      } else if (action === 'restore') {
+        if (!target.deletedAt) { results.failed.push({ id, reason: 'Not archived' }); continue; }
+        await prisma.user.update({ where: { id }, data: { deletedAt: null } });
+        await recordUserManagementEvent('user_restored', req, target, { bulk: true });
+        results.success.push(id);
+      } else if (action === 'permanent_delete') {
+        if (!target.deletedAt) { results.failed.push({ id, reason: 'Must be archived first' }); continue; }
+        await recordUserManagementEvent('user_permanently_deleted', req, target, { bulk: true });
+        await prisma.user.delete({ where: { id } });
+        results.success.push(id);
+      }
+    } catch (e) {
+      results.failed.push({ id, reason: e.message });
+    }
+  }
+
+  res.json({ results, message: `${results.success.length} succeeded, ${results.failed.length} failed` });
 })
 
 // (photos directory is now served above; cleaned images saved locally)

@@ -206,3 +206,24 @@ model OfficialUpdate {
   @@index([createdById])
   @@index([createdAt])
 }
+
+model UserAuditLog {
+  id                   Int      @id @default(autoincrement())
+  type                 String
+  actorId              Int?
+  actorName            String?
+  actorRole            String?
+  targetUserId         Int?
+  targetName           String?
+  targetUsername       String?
+  targetEmployeeNumber String?
+  targetRole           String?
+  details              Json?
+  ip                   String?
+  createdAt            DateTime @default(now())
+
+  @@index([type])
+  @@index([actorId])
+  @@index([targetUserId])
+  @@index([createdAt])
+}
