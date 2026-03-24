@@ -39,6 +39,7 @@ const CLOUDINARY_FOLDERS = {
   forms: process.env.CLOUDINARY_FORMS_FOLDER || 'forms',      // PDF forms
   idcards: process.env.CLOUDINARY_IDCARDS_FOLDER || 'id',      // cleaned ID card images
   complaints: process.env.CLOUDINARY_COMPLAINTS_FOLDER || 'complaints', // complaint reply attachments
+  profiles: process.env.CLOUDINARY_PROFILES_FOLDER || 'profiles', // user profile photos
   // if you ever want a separate folder for generated PDFs, add here
 };
 
@@ -429,8 +430,9 @@ const PHOTOS_UPLOAD_DIR = path.join(UPLOADS_DIR, "photos");
 const FORMS_UPLOAD_DIR = path.join(UPLOADS_DIR, "forms");
 const IDCARDS_UPLOAD_DIR = path.join(UPLOADS_DIR, "idcards");
 const COMPLAINTS_UPLOAD_DIR = path.join(UPLOADS_DIR, "complaints");
+const PROFILES_UPLOAD_DIR = path.join(UPLOADS_DIR, "profiles");
 
-[UPLOADS_DIR, PHOTOS_UPLOAD_DIR, FORMS_UPLOAD_DIR, IDCARDS_UPLOAD_DIR, COMPLAINTS_UPLOAD_DIR].forEach((dir) => {
+[UPLOADS_DIR, PHOTOS_UPLOAD_DIR, FORMS_UPLOAD_DIR, IDCARDS_UPLOAD_DIR, COMPLAINTS_UPLOAD_DIR, PROFILES_UPLOAD_DIR].forEach((dir) => {
   if (!IS_VERCEL && !fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -2778,6 +2780,8 @@ app.post('/api/login', async (req, res) => {
         employeeNumber: user.employeeNumber,
         role: user.role,
         name: user.name,
+        email: user.email,
+        profilePhotoUrl: user.profilePhotoUrl || null,
         firstLogin: user.firstLogin,
         pdfPath: last?.pdfPath || null
       }
@@ -2796,7 +2800,9 @@ app.post('/api/login', async (req, res) => {
 // WhoAmI
 app.get('/api/me', authenticate, async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.user.id } })
-  res.json({ user })
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const { password: _p, otpCodeHash: _o, ...safe } = user;
+  res.json({ user: safe })
 })
 
 // SUPERADMIN: unified monitoring + control center data
@@ -3012,14 +3018,25 @@ app.post('/api/superadmin/security/reset-state', authenticate, requireRole(['SUP
   }
 });
 
-// PUT /api/profile — update own email / phone / phone2 (cannot delete existing phone)
+// PUT /api/profile — update own name/email/phone/phone2 (cannot delete existing phone)
 app.put('/api/profile', authenticate, async (req, res) => {
   try {
-    const { email, phone, phone2 } = req.body;
+    const { name, email, phone, phone2 } = req.body;
     const current = await prisma.user.findUnique({ where: { id: req.user.id } });
     if (!current) return res.status(404).json({ error: 'User not found' });
 
     const data = {};
+
+    if (name !== undefined) {
+      const trimmed = String(name).trim();
+      if (!trimmed) {
+        return res.status(400).json({ error: 'Name is required' });
+      }
+      if (trimmed.length < 2) {
+        return res.status(400).json({ error: 'Name is too short' });
+      }
+      data.name = trimmed;
+    }
 
     if (email !== undefined) {
       const trimmed = String(email).trim();
@@ -3055,6 +3072,57 @@ app.put('/api/profile', authenticate, async (req, res) => {
   } catch (err) {
     console.error('❌ PUT /api/profile error:', err);
     return res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+// PUT /api/profile/photo — upload own profile photo
+app.put('/api/profile/photo', authenticate, uploadPhoto.single('photo'), async (req, res) => {
+  try {
+    const current = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!current) return res.status(404).json({ error: 'User not found' });
+
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'No photo uploaded' });
+    }
+
+    if (!String(req.file.mimetype || '').startsWith('image/')) {
+      return res.status(400).json({ error: 'Uploaded file must be an image' });
+    }
+
+    let profilePhotoUrl = '';
+
+    if (PHOTO_MODE === 'cloudinary') {
+      const uploadResult = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: cloudFolder(CLOUDINARY_FOLDERS.profiles),
+            resource_type: 'image',
+          },
+          (error, result) => (error ? reject(error) : resolve(result))
+        );
+        streamifier.createReadStream(req.file.buffer).pipe(stream);
+      });
+
+      profilePhotoUrl = uploadResult.secure_url;
+    } else {
+      const ext = path.extname(req.file.originalname || '').toLowerCase() || '.png';
+      const safeExt = ['.png', '.jpg', '.jpeg', '.webp'].includes(ext) ? ext : '.png';
+      const fileName = `profile_${req.user.id}_${Date.now()}${safeExt}`;
+      const diskPath = path.join(PROFILES_UPLOAD_DIR, fileName);
+      await fs.promises.writeFile(diskPath, req.file.buffer);
+      profilePhotoUrl = buildUploadUrl(req, `profiles/${fileName}`);
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: req.user.id },
+      data: { profilePhotoUrl },
+    });
+
+    const { password: _p, otpCodeHash: _o, ...safe } = updated;
+    return res.json({ user: safe });
+  } catch (err) {
+    console.error('❌ PUT /api/profile/photo error:', err);
+    return res.status(500).json({ error: 'Failed to upload profile photo' });
   }
 });
 
@@ -4864,16 +4932,16 @@ const voteVoterHash = (userId, sessionId) => voteSha256(`${userId}:${sessionId}:
 
 // ── Admin: Create a voting session ──────────────────────────────────────────
 app.post('/api/admin/voting/sessions', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
-  const { title, description, candidates } = req.body;
-  if (!title || !Array.isArray(candidates) || candidates.length < 2) {
-    return res.status(400).json({ error: 'title and at least 2 candidates required' });
+  const { title, position, description, candidates } = req.body;
+  if (!title || !position || !Array.isArray(candidates) || candidates.length < 2) {
+    return res.status(400).json({ error: 'title, position, and at least 2 candidates required' });
   }
   for (const c of candidates) {
     if (!c.id || !c.name) return res.status(400).json({ error: 'Each candidate needs id and name' });
   }
-  const genesisHash = voteSha256(JSON.stringify({ title, candidates, createdBy: req.user.id, ts: Date.now() }));
+  const genesisHash = voteSha256(JSON.stringify({ title, position, candidates, createdBy: req.user.id, ts: Date.now() }));
   const session = await prisma.votingSession.create({
-    data: { title, description: description || null, candidates, status: 'PENDING', genesisHash, createdById: req.user.id },
+    data: { title, position: position || null, description: description || null, candidates, status: 'PENDING', genesisHash, createdById: req.user.id },
     include: { createdBy: { select: { id: true, name: true, role: true } } },
   });
   res.json({ session });
@@ -4999,7 +5067,7 @@ app.get('/api/voting/sessions/:id', authenticate, async (req, res) => {
   const myVote = await prisma.voteRecord.findUnique({ where: { sessionId_voterHash: { sessionId: id, voterHash: vh } } });
 
   let tally = null;
-  if (session.status === 'ENDED') {
+  if (session.status === 'ACTIVE' || session.status === 'ENDED') {
     const votes = await prisma.voteRecord.findMany({ where: { sessionId: id } });
     const map = {};
     for (const c of (Array.isArray(session.candidates) ? session.candidates : [])) map[c.id] = { candidate: c, count: 0 };

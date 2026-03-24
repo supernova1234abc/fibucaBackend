@@ -12,6 +12,7 @@ model User {
   name           String
   username       String    @unique
   email          String?
+  profilePhotoUrl String?
   phone          String?
   phone2         String?
   password       String
@@ -233,6 +234,7 @@ model UserAuditLog {
 model VotingSession {
   id          Int       @id @default(autoincrement())
   title       String
+  position    String?
   description String?
   candidates  Json      // [{id: string, name: string, description?: string}]
   status      String    @default("PENDING") // PENDING | ACTIVE | ENDED
