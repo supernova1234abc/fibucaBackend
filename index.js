@@ -4929,19 +4929,83 @@ app.post('/api/idcards/:id/fetch-and-clean', authenticate, async (req, res) => {
 const VOTE_SECRET = process.env.VOTE_SECRET || 'fibuca-vote-secret-2026';
 const voteSha256 = (str) => require('crypto').createHash('sha256').update(str).digest('hex');
 const voteVoterHash = (userId, sessionId) => voteSha256(`${userId}:${sessionId}:${VOTE_SECRET}`);
+const normalizeVotingCandidates = (sessionLike) => {
+  const rawCandidates = Array.isArray(sessionLike?.candidates) ? sessionLike.candidates : [];
+  const fallbackTitle = sessionLike?.position || 'General';
+  return rawCandidates.map((candidate, index) => ({
+    ...candidate,
+    id: candidate.id || `candidate-${index + 1}`,
+    positionKey: candidate.positionKey || 'default',
+    positionTitle: candidate.positionTitle || fallbackTitle,
+  }));
+};
+
+const buildVotingGroups = (sessionLike, votes = []) => {
+  const candidates = normalizeVotingCandidates(sessionLike);
+  const groups = new Map();
+
+  for (const candidate of candidates) {
+    const key = candidate.positionKey;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        positionKey: key,
+        positionTitle: candidate.positionTitle,
+        items: [],
+      });
+    }
+    groups.get(key).items.push({ candidate, count: 0 });
+  }
+
+  for (const vote of votes) {
+    const key = vote.positionKey || 'default';
+    const group = groups.get(key);
+    if (!group) continue;
+    const item = group.items.find((entry) => entry.candidate.id === vote.candidateId);
+    if (item) item.count += 1;
+  }
+
+  return Array.from(groups.values()).map((group) => ({
+    ...group,
+    items: group.items.sort((a, b) => b.count - a.count),
+  }));
+};
 
 // ── Admin: Create a voting session ──────────────────────────────────────────
 app.post('/api/admin/voting/sessions', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
   const { title, position, description, candidates } = req.body;
-  if (!title || !position || !Array.isArray(candidates) || candidates.length < 2) {
-    return res.status(400).json({ error: 'title, position, and at least 2 candidates required' });
+  if (!title || !Array.isArray(candidates) || candidates.length < 2) {
+    return res.status(400).json({ error: 'title and at least 2 candidates required' });
   }
+
+  const normalizedCandidates = candidates.map((candidate, index) => ({
+    id: candidate.id || `candidate-${index + 1}`,
+    name: candidate.name,
+    description: candidate.description || null,
+    positionKey: candidate.positionKey || 'default',
+    positionTitle: candidate.positionTitle || position || 'General',
+  }));
+
   for (const c of candidates) {
     if (!c.id || !c.name) return res.status(400).json({ error: 'Each candidate needs id and name' });
   }
-  const genesisHash = voteSha256(JSON.stringify({ title, position, candidates, createdBy: req.user.id, ts: Date.now() }));
+  const distinctPositions = new Set(normalizedCandidates.map((candidate) => candidate.positionKey));
+  if (distinctPositions.size < 1) {
+    return res.status(400).json({ error: 'At least one position is required' });
+  }
+
+  const countsByPosition = new Map();
+  for (const candidate of normalizedCandidates) {
+    countsByPosition.set(candidate.positionKey, (countsByPosition.get(candidate.positionKey) || 0) + 1);
+  }
+  for (const [positionKey, count] of countsByPosition.entries()) {
+    if (count < 2) {
+      return res.status(400).json({ error: `Position ${positionKey} must have at least 2 candidates` });
+    }
+  }
+
+  const genesisHash = voteSha256(JSON.stringify({ title, position, candidates: normalizedCandidates, createdBy: req.user.id, ts: Date.now() }));
   const session = await prisma.votingSession.create({
-    data: { title, position: position || null, description: description || null, candidates, status: 'PENDING', genesisHash, createdById: req.user.id },
+    data: { title, position: position || null, description: description || null, candidates: normalizedCandidates, status: 'PENDING', genesisHash, createdById: req.user.id },
     include: { createdBy: { select: { id: true, name: true, role: true } } },
   });
   res.json({ session });
@@ -5001,7 +5065,7 @@ app.get('/api/admin/voting/sessions/:id/results', authenticate, requireRole(['AD
   let chainValid = true;
   let prevHash = session.genesisHash;
   for (const vote of session.votes) {
-    const expectedHash = voteSha256(`${prevHash}|${vote.voterHash}|${vote.candidateId}|${vote.createdAt.toISOString()}`);
+    const expectedHash = voteSha256(`${prevHash}|${vote.voterHash}|${vote.positionKey || 'default'}|${vote.candidateId}|${vote.createdAt.toISOString()}`);
     if (expectedHash !== vote.blockHash || vote.prevHash !== prevHash) {
       chainValid = false;
       break;
@@ -5009,22 +5073,18 @@ app.get('/api/admin/voting/sessions/:id/results', authenticate, requireRole(['AD
     prevHash = vote.blockHash;
   }
 
-  const tally = {};
-  const candidates = Array.isArray(session.candidates) ? session.candidates : [];
-  for (const c of candidates) tally[c.id] = { candidate: c, count: 0 };
-  for (const vote of session.votes) {
-    if (tally[vote.candidateId]) tally[vote.candidateId].count++;
-  }
+  const tallyByPosition = buildVotingGroups(session, session.votes);
 
   res.json({
     session: { ...session, votes: undefined },
-    totalVotes: session._count ? session._count.votes : session.votes.length,
+    totalVotes: session.votes.length,
     chainValid,
-    tally: Object.values(tally).sort((a, b) => b.count - a.count),
+    tallyByPosition,
     blocks: session.votes.map((v) => ({
       blockIndex: v.blockIndex,
       blockHash: v.blockHash,
       prevHash: v.prevHash,
+      positionKey: v.positionKey,
       candidateId: v.candidateId,
       createdAt: v.createdAt,
     })),
@@ -5045,12 +5105,16 @@ app.get('/api/voting/sessions', authenticate, async (req, res) => {
   const myVotes = sessions.length > 0
     ? await prisma.voteRecord.findMany({
         where: { OR: sessions.map((s) => ({ sessionId: s.id, voterHash: voteVoterHash(req.user.id, s.id) })) },
-        select: { sessionId: true },
+        select: { sessionId: true, positionKey: true },
       })
     : [];
-  const votedSet = new Set(myVotes.map((v) => v.sessionId));
+  const votedMap = new Map();
+  for (const vote of myVotes) {
+    if (!votedMap.has(vote.sessionId)) votedMap.set(vote.sessionId, []);
+    votedMap.get(vote.sessionId).push(vote.positionKey || 'default');
+  }
 
-  res.json({ sessions: sessions.map((s) => ({ ...s, hasVoted: votedSet.has(s.id) })) });
+  res.json({ sessions: sessions.map((s) => ({ ...s, votedPositionKeys: votedMap.get(s.id) || [], hasVoted: (votedMap.get(s.id) || []).length > 0 })) });
 });
 
 // ── Staff: Get single session detail ─────────────────────────────────────────
@@ -5064,18 +5128,35 @@ app.get('/api/voting/sessions/:id', authenticate, async (req, res) => {
   if (session.status === 'PENDING') return res.status(403).json({ error: 'Session not started yet' });
 
   const vh = voteVoterHash(req.user.id, id);
-  const myVote = await prisma.voteRecord.findUnique({ where: { sessionId_voterHash: { sessionId: id, voterHash: vh } } });
+  const myVotes = await prisma.voteRecord.findMany({
+    where: { sessionId: id, voterHash: vh },
+    orderBy: { createdAt: 'asc' },
+  });
 
-  let tally = null;
+  let tallyByPosition = null;
   if (session.status === 'ACTIVE' || session.status === 'ENDED') {
     const votes = await prisma.voteRecord.findMany({ where: { sessionId: id } });
-    const map = {};
-    for (const c of (Array.isArray(session.candidates) ? session.candidates : [])) map[c.id] = { candidate: c, count: 0 };
-    for (const v of votes) { if (map[v.candidateId]) map[v.candidateId].count++; }
-    tally = Object.values(map).sort((a, b) => b.count - a.count);
+    tallyByPosition = buildVotingGroups(session, votes);
   }
 
-  res.json({ session, hasVoted: !!myVote, receiptHash: myVote ? myVote.blockHash : null, tally });
+  const votedPositionKeys = myVotes.map((vote) => vote.positionKey || 'default');
+  const receiptHashesByPosition = myVotes.reduce((acc, vote) => {
+    acc[vote.positionKey || 'default'] = vote.blockHash;
+    return acc;
+  }, {});
+  const votedCandidateIdsByPosition = myVotes.reduce((acc, vote) => {
+    acc[vote.positionKey || 'default'] = vote.candidateId;
+    return acc;
+  }, {});
+
+  res.json({
+    session,
+    hasVoted: myVotes.length > 0,
+    votedPositionKeys,
+    votedCandidateIdsByPosition,
+    receiptHashesByPosition,
+    tallyByPosition,
+  });
 });
 
 // ── Staff: Cast a vote ────────────────────────────────────────────────────────
@@ -5091,22 +5172,32 @@ app.post('/api/voting/sessions/:id/vote', authenticate, requireRole(['STAFF']), 
   if (!session) return res.status(404).json({ error: 'Session not found' });
   if (session.status !== 'ACTIVE') return res.status(400).json({ error: 'Voting is not open for this session' });
 
-  const candidates = Array.isArray(session.candidates) ? session.candidates : [];
-  if (!candidates.find((c) => c.id === candidateId)) return res.status(400).json({ error: 'Invalid candidateId' });
+  const candidates = normalizeVotingCandidates(session);
+  const selectedCandidate = candidates.find((c) => c.id === candidateId);
+  if (!selectedCandidate) return res.status(400).json({ error: 'Invalid candidateId' });
 
   const vh = voteVoterHash(req.user.id, id);
   const prevHash = session.votes.length > 0 ? session.votes[0].blockHash : session.genesisHash;
   const blockIndex = session.votes.length > 0 ? session.votes[0].blockIndex + 1 : 0;
   const now = new Date();
-  const blockHash = voteSha256(`${prevHash}|${vh}|${candidateId}|${now.toISOString()}`);
+  const blockHash = voteSha256(`${prevHash}|${vh}|${selectedCandidate.positionKey}|${candidateId}|${now.toISOString()}`);
 
   try {
     const vote = await prisma.voteRecord.create({
-      data: { sessionId: id, voterHash: vh, candidateId, blockIndex, prevHash, blockHash, createdAt: now },
+      data: {
+        sessionId: id,
+        voterHash: vh,
+        positionKey: selectedCandidate.positionKey,
+        candidateId,
+        blockIndex,
+        prevHash,
+        blockHash,
+        createdAt: now,
+      },
     });
-    res.json({ success: true, blockHash: vote.blockHash, blockIndex: vote.blockIndex });
+    res.json({ success: true, blockHash: vote.blockHash, blockIndex: vote.blockIndex, positionKey: selectedCandidate.positionKey });
   } catch (err) {
-    if (err.code === 'P2002') return res.status(409).json({ error: 'You have already voted in this session' });
+    if (err.code === 'P2002') return res.status(409).json({ error: 'You have already voted for this position' });
     throw err;
   }
 });

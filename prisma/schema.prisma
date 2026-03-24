@@ -254,6 +254,7 @@ model VoteRecord {
   id          Int      @id @default(autoincrement())
   sessionId   Int
   voterHash   String   // SHA256(userId:sessionId:VOTE_SECRET) — anonymous, verifiable
+  positionKey String   @default("default")
   candidateId String
   blockIndex  Int
   prevHash    String
@@ -262,7 +263,8 @@ model VoteRecord {
 
   session VotingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
-  @@unique([sessionId, voterHash])
+  @@unique([sessionId, voterHash, positionKey])
   @@index([sessionId])
+  @@index([positionKey])
   @@index([blockIndex])
 }
