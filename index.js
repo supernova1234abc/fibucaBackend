@@ -341,6 +341,17 @@ const authLimiter = rateLimit({
   },
 });
 
+const publicVerifyLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    recordSecurityEvent('public_verify_rate_limited', req, { windowMs: 5 * 60 * 1000, max: 120 });
+    return res.status(429).json({ error: 'Too many verification requests. Please try again shortly.' });
+  },
+});
+
 const loginSlowdown = slowDown({
   windowMs: 15 * 60 * 1000,
   delayAfter: 5,
@@ -3423,6 +3434,99 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
 
 const crypto = require("crypto");
 
+function generateIdCardVerificationToken() {
+  return crypto.randomBytes(18).toString("base64url");
+}
+
+async function ensureIdCardVerificationToken(card) {
+  if (!card || card.verificationToken) return card;
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const verificationToken = generateIdCardVerificationToken();
+      const updated = await prisma.idCard.update({
+        where: { id: card.id },
+        data: { verificationToken },
+      });
+      return { ...card, verificationToken: updated.verificationToken };
+    } catch (err) {
+      if (err?.code !== 'P2002') {
+        throw err;
+      }
+    }
+  }
+
+  throw new Error(`Failed to assign verification token for ID card ${card.id}`);
+}
+
+async function ensureIdCardVerificationTokens(cards = []) {
+  return Promise.all(cards.map((card) => ensureIdCardVerificationToken(card)));
+}
+
+function getPublicIdCardStatus(card) {
+  if (!card) return 'NOT_FOUND';
+  if (!card.isActive || card.revokedAt) return 'REVOKED';
+  if (card.expiresAt && new Date(card.expiresAt).getTime() < Date.now()) return 'EXPIRED';
+  return 'VALID';
+}
+
+function buildPublicIdCardResponse(card) {
+  const status = getPublicIdCardStatus(card);
+  const valid = status === 'VALID';
+
+  if (!card) {
+    return {
+      valid: false,
+      status,
+      message: 'ID card not found',
+      card: null,
+    };
+  }
+
+  return {
+    valid,
+    status,
+    message:
+      status === 'VALID'
+        ? 'Verified genuine ID card'
+        : status === 'REVOKED'
+        ? 'This ID card has been revoked'
+        : 'This ID card has expired',
+    card: {
+      fullName: card.fullName,
+      role: card.role,
+      company: card.company,
+      cardNumber: card.cardNumber,
+      issuedAt: card.issuedAt,
+      expiresAt: card.expiresAt,
+      photoUrl: card.cleanPhotoUrl || card.rawPhotoUrl || null,
+    },
+  };
+}
+
+app.get('/api/public/idcards/verify/:token', publicVerifyLimiter, async (req, res) => {
+  try {
+    const token = String(req.params.token || '').trim();
+    if (!token || token.length < 12 || token.length > 200) {
+      return res.status(400).json({ valid: false, status: 'INVALID_REQUEST', message: 'Invalid verification token' });
+    }
+
+    const card = await prisma.idCard.findUnique({
+      where: { verificationToken: token },
+    });
+
+    if (!card) {
+      recordSecurityEvent('public_idcard_verify_not_found', req, { tokenPrefix: token.slice(0, 8) });
+      return res.json(buildPublicIdCardResponse(null));
+    }
+
+    return res.json(buildPublicIdCardResponse(card));
+  } catch (err) {
+    console.error('❌ GET /api/public/idcards/verify/:token error:', err);
+    return res.status(500).json({ valid: false, status: 'ERROR', message: 'Failed to verify ID card' });
+  }
+});
+
 // POST /api/staff/generate-link
 app.post(
   "/api/staff/generate-link",
@@ -3769,7 +3873,8 @@ app.get('/api/admin/idcards', authenticate, requireRole(['ADMIN', 'SUPERADMIN'])
         }
       }
     });
-    res.json(cards);
+    const cardsWithTokens = await ensureIdCardVerificationTokens(cards);
+    res.json(cardsWithTokens);
   } catch (err) {
     console.error('❌ GET /api/admin/idcards error:', err);
     res.status(500).json({ error: 'Failed to fetch ID cards' });
@@ -3845,6 +3950,8 @@ app.get('/api/idcards/:userId', authenticate, async (req, res) => {
       orderBy: { issuedAt: 'desc' }
     });
 
+    cards = await ensureIdCardVerificationTokens(cards);
+
     console.log(`🔍 fetched ${cards.length} cards for user ${uid} (PHOTO_MODE=${PHOTO_MODE})`);
 
     // if we're in cloudinary mode, migrate any old local URLs before returning
@@ -3904,6 +4011,8 @@ app.post('/api/idcards', authenticate, uploadPhoto.single('photo'), async (req, 
         company,
         role,
         cardNumber,
+        verificationToken: generateIdCardVerificationToken(),
+        isActive: true,
         rawPhotoUrl: '',
         cleanPhotoUrl: '',
       }

@@ -104,8 +104,14 @@ model IdCard {
   role          String
   issuedAt      DateTime @default(now())
   cardNumber    String   @unique
+  verificationToken String @unique
+  isActive      Boolean  @default(true)
+  revokedAt     DateTime?
+  expiresAt     DateTime?
 
   @@index([userId])
+  @@index([verificationToken])
+  @@index([isActive])
 }
 
 model Complaint {
