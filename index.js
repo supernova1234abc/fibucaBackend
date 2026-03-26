@@ -4082,6 +4082,11 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
       return res.status(403).json({ error: 'Forbidden' });
     }
 
+    // Clients may upload only once; staff/admin can update freely
+    if (req.user.role === 'CLIENT' && card.rawPhotoUrl) {
+      return res.status(403).json({ error: 'You have already uploaded your ID photo. Contact staff to update it.' });
+    }
+
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({ error: 'No photo uploaded' });
     }
@@ -4121,6 +4126,15 @@ app.put('/api/idcards/:id/photo', authenticate, uploadPhoto.single('photo'), asy
       where: { id },
       data: { rawPhotoUrl, cleanPhotoUrl },
     });
+
+    // Sync ID card photo to user profile photo so avatar reflects it
+    const displayPhoto = cleanPhotoUrl || rawPhotoUrl;
+    if (displayPhoto) {
+      await prisma.user.update({
+        where: { id: card.userId },
+        data: { profilePhotoUrl: displayPhoto },
+      }).catch((e) => console.warn('⚠️ profilePhotoUrl sync skipped:', e.message));
+    }
 
     res.json({
       message: `✅ Photo uploaded using ${PHOTO_MODE} mode`,
