@@ -3331,30 +3331,44 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
     });
 
     if (existingSubmission) {
-      return res.status(409).json({ error: 'Submission already exists for this employee number' });
+      // Only reject as a genuine duplicate if the ID card was also created successfully.
+      // If the card is missing, this is a partial failure (submission saved but idCard.create
+      // crashed) — allow recovery by falling through rather than returning 409.
+      const existingUserForCheck = await prisma.user.findUnique({ where: { employeeNumber: form.employeeNumber } });
+      const existingCardForCheck = existingUserForCheck
+        ? await prisma.idCard.findFirst({ where: { userId: existingUserForCheck.id } })
+        : null;
+
+      if (existingCardForCheck) {
+        return res.status(409).json({ error: 'Submission already exists for this employee number' });
+      }
+      // Partial failure detected — fall through to recover the missing ID card
     }
 
-    // 5️⃣ Create new submission
-    const submission = await prisma.submission.create({
-      data: {
-        employeeName: form.employeeName,
-        employeeNumber: form.employeeNumber,
-        phoneNumber: form.phoneNumber,
-        employerName: form.employerName,
-        branchName: form.branchName,
-        dues: form.dues,
-        witness: form.witness,
-        pdfPath: pdfUrl,
-        submittedAt: new Date(),
-        staffId: updatedLink.staffId,
-      },
-    });
+    // 5️⃣ Create new submission (skip if recovering from a partial failure)
+    let submission = existingSubmission;
+    if (!submission) {
+      submission = await prisma.submission.create({
+        data: {
+          employeeName: form.employeeName,
+          employeeNumber: form.employeeNumber,
+          phoneNumber: form.phoneNumber,
+          employerName: form.employerName,
+          branchName: form.branchName,
+          dues: form.dues,
+          witness: form.witness,
+          pdfPath: pdfUrl,
+          submittedAt: new Date(),
+          staffId: updatedLink.staffId,
+        },
+      });
 
-    //increment link usage
-    await prisma.staffLink.update({
-      where: { id: updatedLink.id },
-      data: { usedCount: { increment: 1 } }
-    });
+      //increment link usage
+      await prisma.staffLink.update({
+        where: { id: updatedLink.id },
+        data: { usedCount: { increment: 1 } }
+      });
+    }
 
     // 6️⃣ Check if user exists, else create
     let user = await prisma.user.findUnique({ where: { employeeNumber: form.employeeNumber } });
@@ -3407,6 +3421,7 @@ app.post("/submit-form/:token", uploadPDF.single("pdf"), async (req, res) => {
           role: "Member",
           issuedAt: new Date(),
           cardNumber: makeCardNumber(),
+          verificationToken: generateIdCardVerificationToken(),
         },
       });
     }
