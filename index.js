@@ -5352,6 +5352,232 @@ app.delete('/api/admin/voting/sessions/:id', authenticate, requireRole(['ADMIN',
   res.json({ success: true });
 });
 
+// ── Staff/Admin Contributions (Michango) ────────────────────────────────────
+app.get('/api/staff/contributions', authenticate, requireRole(['STAFF']), async (req, res) => {
+  try {
+    const contributions = await prisma.contribution.findMany({
+      where: { isActive: true },
+      orderBy: [{ dueDate: 'asc' }, { createdAt: 'desc' }],
+      include: {
+        payments: {
+          where: { userId: req.user.id },
+          take: 1,
+        },
+      },
+    });
+
+    const rows = contributions.map((item) => {
+      const payment = item.payments?.[0] || null;
+      return {
+        id: item.id,
+        title: item.title,
+        description: item.description,
+        amount: item.amount,
+        dueDate: item.dueDate,
+        status: payment?.status || 'UNPAID',
+        paidAt: payment?.paidAt || null,
+      };
+    });
+
+    res.json(rows);
+  } catch (err) {
+    console.error('❌ GET /api/staff/contributions failed:', err);
+    res.status(500).json({ error: 'Failed to fetch contributions' });
+  }
+});
+
+app.get('/api/admin/contributions', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  try {
+    const [staffCount, contributions] = await Promise.all([
+      prisma.user.count({ where: { role: 'STAFF', deletedAt: null } }),
+      prisma.contribution.findMany({
+        orderBy: [{ createdAt: 'desc' }],
+        include: {
+          payments: {
+            where: { status: 'PAID' },
+            select: { id: true },
+          },
+          createdBy: {
+            select: { id: true, name: true, role: true },
+          },
+        },
+      }),
+    ]);
+
+    const rows = contributions.map((item) => ({
+      id: item.id,
+      title: item.title,
+      description: item.description,
+      amount: item.amount,
+      dueDate: item.dueDate,
+      isActive: item.isActive,
+      createdAt: item.createdAt,
+      createdBy: item.createdBy,
+      staffCount,
+      paidCount: item.payments?.length || 0,
+    }));
+
+    res.json(rows);
+  } catch (err) {
+    console.error('❌ GET /api/admin/contributions failed:', err);
+    res.status(500).json({ error: 'Failed to fetch contributions' });
+  }
+});
+
+app.post('/api/admin/contributions', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  try {
+    const title = String(req.body?.title || '').trim();
+    const description = String(req.body?.description || '').trim() || null;
+    const amount = Number(req.body?.amount);
+    const dueDateRaw = req.body?.dueDate ? String(req.body.dueDate) : '';
+    const dueDate = dueDateRaw ? new Date(dueDateRaw) : null;
+
+    if (!title) return res.status(400).json({ error: 'Title is required' });
+    if (!Number.isFinite(amount) || amount < 0) {
+      return res.status(400).json({ error: 'Amount must be a valid non-negative number' });
+    }
+    if (dueDateRaw && Number.isNaN(dueDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid due date' });
+    }
+
+    const created = await prisma.contribution.create({
+      data: {
+        title,
+        description,
+        amount,
+        dueDate,
+        createdById: req.user.id,
+      },
+    });
+
+    res.status(201).json(created);
+  } catch (err) {
+    console.error('❌ POST /api/admin/contributions failed:', err);
+    res.status(500).json({ error: 'Failed to create contribution' });
+  }
+});
+
+app.delete('/api/admin/contributions/:id', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid contribution id' });
+
+    const existing = await prisma.contribution.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Contribution not found' });
+
+    await prisma.contribution.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ DELETE /api/admin/contributions/:id failed:', err);
+    res.status(500).json({ error: 'Failed to delete contribution' });
+  }
+});
+
+app.get('/api/admin/contributions/:id/contributors', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid contribution id' });
+
+    const contribution = await prisma.contribution.findUnique({ where: { id } });
+    if (!contribution) return res.status(404).json({ error: 'Contribution not found' });
+
+    const [staffUsers, payments] = await Promise.all([
+      prisma.user.findMany({
+        where: { role: 'STAFF', deletedAt: null },
+        orderBy: { name: 'asc' },
+        select: { id: true, name: true, username: true, employeeNumber: true },
+      }),
+      prisma.contributionPayment.findMany({
+        where: { contributionId: id },
+        select: { userId: true, status: true, paidAt: true, notes: true, recordedById: true },
+      }),
+    ]);
+
+    const paymentByUserId = new Map(payments.map((p) => [p.userId, p]));
+
+    const contributors = staffUsers.map((u) => {
+      const p = paymentByUserId.get(u.id);
+      return {
+        userId: u.id,
+        name: u.name,
+        username: u.username,
+        employeeNumber: u.employeeNumber,
+        status: p?.status || 'UNPAID',
+        paidAt: p?.paidAt || null,
+        notes: p?.notes || null,
+        recordedById: p?.recordedById || null,
+      };
+    });
+
+    res.json({ contribution, contributors });
+  } catch (err) {
+    console.error('❌ GET /api/admin/contributions/:id/contributors failed:', err);
+    res.status(500).json({ error: 'Failed to fetch contributors' });
+  }
+});
+
+app.put('/api/admin/contributions/:id/contributors/:userId', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  try {
+    const contributionId = parseInt(req.params.id, 10);
+    const userId = parseInt(req.params.userId, 10);
+    if (Number.isNaN(contributionId) || Number.isNaN(userId)) {
+      return res.status(400).json({ error: 'Invalid contribution/user id' });
+    }
+
+    const status = String(req.body?.status || '').toUpperCase();
+    if (!['PAID', 'UNPAID'].includes(status)) {
+      return res.status(400).json({ error: 'Status must be PAID or UNPAID' });
+    }
+
+    const [contribution, targetUser] = await Promise.all([
+      prisma.contribution.findUnique({ where: { id: contributionId } }),
+      prisma.user.findUnique({ where: { id: userId } }),
+    ]);
+
+    if (!contribution) return res.status(404).json({ error: 'Contribution not found' });
+    if (!targetUser || targetUser.role !== 'STAFF' || targetUser.deletedAt) {
+      return res.status(404).json({ error: 'Staff user not found' });
+    }
+
+    const paidAt = status === 'PAID'
+      ? (req.body?.paidAt ? new Date(req.body.paidAt) : new Date())
+      : null;
+    if (status === 'PAID' && Number.isNaN(paidAt.getTime())) {
+      return res.status(400).json({ error: 'Invalid paidAt date' });
+    }
+
+    const notes = typeof req.body?.notes === 'string' ? req.body.notes.trim() : null;
+
+    const payment = await prisma.contributionPayment.upsert({
+      where: {
+        contributionId_userId: {
+          contributionId,
+          userId,
+        },
+      },
+      create: {
+        contributionId,
+        userId,
+        status,
+        paidAt,
+        notes,
+        recordedById: req.user.id,
+      },
+      update: {
+        status,
+        paidAt,
+        notes,
+        recordedById: req.user.id,
+      },
+    });
+
+    res.json(payment);
+  } catch (err) {
+    console.error('❌ PUT /api/admin/contributions/:id/contributors/:userId failed:', err);
+    res.status(500).json({ error: 'Failed to update contribution payment status' });
+  }
+});
+
 // global error handler (must come after all route definitions)
 app.use((err, req, res, next) => {
   // multer file size limit error

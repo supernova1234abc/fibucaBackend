@@ -41,6 +41,9 @@ model User {
   publishedDocuments OfficialDocument[]
   publishedUpdates   OfficialUpdate[]
   votingSessions VotingSession[] @relation("VotingCreatedBy")
+  contributionsCreated Contribution[] @relation("ContributionCreatedBy")
+  contributionPayments ContributionPayment[] @relation("ContributionForUser")
+  contributionRecords ContributionPayment[] @relation("ContributionRecordedBy")
 }
 
 
@@ -273,4 +276,46 @@ model VoteRecord {
   @@index([sessionId])
   @@index([positionKey])
   @@index([blockIndex])
+}
+
+model Contribution {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String?
+  amount      Float
+  dueDate     DateTime?
+  isActive    Boolean  @default(true)
+  createdById Int
+  createdBy   User     @relation("ContributionCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  payments    ContributionPayment[]
+
+  @@index([createdById])
+  @@index([dueDate])
+}
+
+model ContributionPayment {
+  id             Int                @id @default(autoincrement())
+  contributionId Int
+  userId         Int
+  status         ContributionStatus @default(UNPAID)
+  paidAt         DateTime?
+  notes          String?
+  recordedById   Int?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  contribution Contribution @relation(fields: [contributionId], references: [id], onDelete: Cascade)
+  user         User         @relation("ContributionForUser", fields: [userId], references: [id], onDelete: Cascade)
+  recordedBy   User?        @relation("ContributionRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@unique([contributionId, userId])
+  @@index([contributionId])
+  @@index([userId])
+  @@index([status])
+}
+
+enum ContributionStatus {
+  PAID
+  UNPAID
 }
