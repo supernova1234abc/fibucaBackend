@@ -5340,12 +5340,14 @@ app.post('/api/voting/sessions/:id/vote', authenticate, requireRole(['STAFF']), 
   }
 });
 
-// ── Admin: Delete a PENDING session ─────────────────────────────────────────
+// ── Admin: Delete a PENDING/ENDED session ───────────────────────────────────
 app.delete('/api/admin/voting/sessions/:id', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
   const id = parseInt(req.params.id);
   const session = await prisma.votingSession.findUnique({ where: { id } });
   if (!session) return res.status(404).json({ error: 'Session not found' });
-  if (session.status !== 'PENDING') return res.status(400).json({ error: 'Can only delete PENDING sessions' });
+  if (!['PENDING', 'ENDED'].includes(session.status)) {
+    return res.status(400).json({ error: 'Can only delete PENDING or ENDED sessions' });
+  }
   await prisma.votingSession.delete({ where: { id } });
   res.json({ success: true });
 });
