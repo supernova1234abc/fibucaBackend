@@ -279,19 +279,24 @@ model VoteRecord {
 }
 
 model Contribution {
-  id          Int      @id @default(autoincrement())
-  title       String
-  description String?
-  amount      Float
-  dueDate     DateTime?
-  isActive    Boolean  @default(true)
-  createdById Int
-  createdBy   User     @relation("ContributionCreatedBy", fields: [createdById], references: [id])
-  createdAt   DateTime @default(now())
-  payments    ContributionPayment[]
+  id                  Int       @id @default(autoincrement())
+  title               String
+  description         String?
+  amount              Float
+  dueDate             DateTime?
+  isActive            Boolean   @default(true)
+  publishedAt         DateTime?
+  visibleToStaffIds   Json      @default("[]") // Array of staff IDs who can see this contribution
+  startDate           DateTime?
+  endDate             DateTime?
+  createdById         Int
+  createdBy           User      @relation("ContributionCreatedBy", fields: [createdById], references: [id])
+  createdAt           DateTime  @default(now())
+  payments            ContributionPayment[]
 
   @@index([createdById])
   @@index([dueDate])
+  @@index([publishedAt])
 }
 
 model ContributionPayment {

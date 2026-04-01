@@ -5345,8 +5345,10 @@ app.delete('/api/admin/voting/sessions/:id', authenticate, requireRole(['ADMIN',
   const id = parseInt(req.params.id);
   const session = await prisma.votingSession.findUnique({ where: { id } });
   if (!session) return res.status(404).json({ error: 'Session not found' });
-  if (!['PENDING', 'ENDED'].includes(session.status)) {
-    return res.status(400).json({ error: 'Can only delete PENDING or ENDED sessions' });
+  // Super admin can delete any voting session, admins can only delete PENDING or ENDED
+  const isSuperAdmin = req.user.role === 'SUPERADMIN';
+  if (!isSuperAdmin && !['PENDING', 'ENDED'].includes(session.status)) {
+    return res.status(400).json({ error: 'You can only delete PENDING or ENDED sessions. Contact super admin for completed sessions.' });
   }
   await prisma.votingSession.delete({ where: { id } });
   res.json({ success: true });
@@ -5356,8 +5358,11 @@ app.delete('/api/admin/voting/sessions/:id', authenticate, requireRole(['ADMIN',
 app.get('/api/staff/contributions', authenticate, requireRole(['STAFF']), async (req, res) => {
   try {
     const contributions = await prisma.contribution.findMany({
-      where: { isActive: true },
-      orderBy: [{ dueDate: 'asc' }, { createdAt: 'desc' }],
+      where: {
+        isActive: true,
+        publishedAt: { not: null }, // Only published contributions
+      },
+      orderBy: [{ dueDate: 'asc' }, { publishedAt: 'desc' }, { createdAt: 'desc' }],
       include: {
         payments: {
           where: { userId: req.user.id },
@@ -5366,16 +5371,27 @@ app.get('/api/staff/contributions', authenticate, requireRole(['STAFF']), async 
       },
     });
 
-    const rows = contributions.map((item) => {
+    // Filter by visibility - only show if staff is in visibleToStaffIds array
+    const filteredContributions = contributions.filter(item => {
+      const visibleIds = Array.isArray(item.visibleToStaffIds) ? item.visibleToStaffIds : [];
+      return visibleIds.includes(req.user.id);
+    });
+
+    const rows = filteredContributions.map((item) => {
       const payment = item.payments?.[0] || null;
+      const isNew = item.publishedAt && (Date.now() - new Date(item.publishedAt).getTime()) < 24 * 60 * 60 * 1000; // New if published < 24hrs ago
       return {
         id: item.id,
         title: item.title,
         description: item.description,
         amount: item.amount,
         dueDate: item.dueDate,
+        startDate: item.startDate,
+        endDate: item.endDate,
         status: payment?.status || 'UNPAID',
         paidAt: payment?.paidAt || null,
+        isNew,
+        publishedAt: item.publishedAt,
       };
     });
 
@@ -5509,7 +5525,7 @@ app.get('/api/admin/contributions/:id/contributors', authenticate, requireRole([
       };
     });
 
-    res.json({ contribution, contributors });
+    res.json({ contribution, contributors, allStaff: staffUsers });
   } catch (err) {
     console.error('❌ GET /api/admin/contributions/:id/contributors failed:', err);
     res.status(500).json({ error: 'Failed to fetch contributors' });
@@ -5575,6 +5591,45 @@ app.put('/api/admin/contributions/:id/contributors/:userId', authenticate, requi
   } catch (err) {
     console.error('❌ PUT /api/admin/contributions/:id/contributors/:userId failed:', err);
     res.status(500).json({ error: 'Failed to update contribution payment status' });
+  }
+});
+
+// Publish contribution with staff visibility selection
+app.post('/api/admin/contributions/:id/publish', authenticate, requireRole(['ADMIN', 'SUPERADMIN']), async (req, res) => {
+  try {
+    const contributionId = parseInt(req.params.id, 10);
+    if (Number.isNaN(contributionId)) {
+      return res.status(400).json({ error: 'Invalid contribution id' });
+    }
+
+    const visibleToStaffIds = Array.isArray(req.body?.visibleToStaffIds) ? req.body.visibleToStaffIds : [];
+    const startDate = req.body?.startDate ? new Date(req.body.startDate) : null;
+    const endDate = req.body?.endDate ? new Date(req.body.endDate) : null;
+
+    if (startDate && Number.isNaN(startDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid start date' });
+    }
+    if (endDate && Number.isNaN(endDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid end date' });
+    }
+
+    const contribution = await prisma.contribution.findUnique({ where: { id: contributionId } });
+    if (!contribution) return res.status(404).json({ error: 'Contribution not found' });
+
+    const updated = await prisma.contribution.update({
+      where: { id: contributionId },
+      data: {
+        publishedAt: new Date(),
+        visibleToStaffIds: visibleToStaffIds,
+        startDate: startDate,
+        endDate: endDate,
+      },
+    });
+
+    res.json({ success: true, contribution: updated });
+  } catch (err) {
+    console.error('❌ POST /api/admin/contributions/:id/publish failed:', err);
+    res.status(500).json({ error: 'Failed to publish contribution' });
   }
 });
 
